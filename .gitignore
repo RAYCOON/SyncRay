@@ -1,0 +1,49 @@
+# SyncRay Git Ignore File
+
+# Export data directory
+sync-data/
+*.json
+!sync-config.json
+!examples/*.json
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# PowerShell
+*.ps1xml
+
+# Logs
+*.log
+*.txt
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Temporary files
+*.tmp
+*.temp
+~*
+
+# Configuration overrides (for local development)
+sync-config.local.json
+sync-config.dev.json
+sync-config.prod.json
+
+# Test outputs
+test-results/
+test-data/
