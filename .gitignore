@@ -47,3 +47,4 @@ sync-config.prod.json
 # Test outputs
 test-results/
 test-data/
+/src/sync-config.json

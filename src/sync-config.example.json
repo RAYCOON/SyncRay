@@ -1,0 +1,39 @@
+{
+  "databases": {
+    "source": {
+      "server": "YOUR-SERVER\\INSTANCE",
+      "database": "SourceDatabase",
+      "auth": "windows"
+    },
+    "target": {
+      "server": "YOUR-SERVER",
+      "database": "TargetDatabase",
+      "auth": "sql",
+      "user": "username",
+      "password": "password"
+    }
+  },
+  
+  "syncTables": [ 
+    {
+      "sourceTable": "Users",
+      "targetTable": "Users_Archive",
+      "matchOn": ["UserID"],
+      "ignoreColumns": ["LastModified"],
+      "allowInserts": true,
+      "allowUpdates": true,      
+      "allowDeletes": false,
+      "preserveIdentity": false,
+      "exportWhere": "IsActive = 1"
+    },
+    {
+      "sourceTable": "Orders",
+      "matchOn": ["OrderID"],
+      "allowDeletes": true
+    }
+  ],
+  
+  "exportPath": "./sync-data",
+  "defaultDryRun": true,
+  "batchSize": 1000
+}
