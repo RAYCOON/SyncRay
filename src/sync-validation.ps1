@@ -517,7 +517,9 @@ SELECT * FROM DuplicateExamples
             if ($PrimaryKeys.Count -gt 0) {
                 $detailedDuplicates = Get-DetailedDuplicateRecords -Connection $Connection -TableName $TableName -MatchFields $MatchFields -PrimaryKeys $PrimaryKeys -WhereClause $WhereClause -ShowSQL:$ShowSQL
                 if ($detailedDuplicates) {
-                    $duplicateInfo.DetailedDuplicates = $detailedDuplicates
+                    $duplicateInfo.DetailedDuplicates = $detailedDuplicates.FormattedOutput
+                    # Also store structured data for CSV export
+                    $duplicateInfo.DuplicateDetails = $detailedDuplicates.Details
                 }
             }
         }
@@ -638,7 +640,12 @@ ORDER BY
         
         # Format as table with proper column layout
         $tableOutput = $results | Format-Table -Property * -AutoSize -Wrap | Out-String -Width 300
-        return $tableOutput
+        
+        # Return both the formatted output and structured data
+        return @{
+            FormattedOutput = $tableOutput
+            Details = $results
+        }
         
     }
     catch {
@@ -646,5 +653,162 @@ ORDER BY
             Write-Host "[DEBUG] Error getting detailed duplicates: $_" -ForegroundColor Red
         }
         return $null
+    }
+}
+
+function Export-DuplicatesToCSV {
+    param(
+        [array]$DuplicateProblems,
+        [string]$OutputPath,
+        [string]$Delimiter = $null
+    )
+    
+    try {
+        # Ensure directory exists
+        $outputDir = Split-Path -Parent $OutputPath
+        if (-not (Test-Path $outputDir)) {
+            New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
+        }
+        
+        # Create CSV data array
+        $csvData = @()
+        
+        foreach ($problem in $DuplicateProblems) {
+            # Expand duplicate details into individual rows
+            foreach ($detail in $problem.Details) {
+                $row = [PSCustomObject]@{
+                    TableName = $problem.TableName
+                    MatchOnFields = $problem.MatchOnFields
+                    DuplicateGroup = $detail.DuplicateGroup
+                    DuplicateGroups = $problem.DuplicateGroups
+                    TotalDuplicates = $problem.TotalDuplicates
+                    Timestamp = $problem.Timestamp
+                }
+                
+                # Add primary key columns
+                foreach ($pk in $detail.PSObject.Properties) {
+                    if ($pk.Name -notin @('DuplicateGroup')) {
+                        $row | Add-Member -NotePropertyName $pk.Name -NotePropertyValue $pk.Value
+                    }
+                }
+                
+                $csvData += $row
+            }
+        }
+        
+        # Export to CSV
+        if ($Delimiter) {
+            $csvData | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8 -Delimiter $Delimiter
+        } else {
+            $csvData | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8 -UseCulture
+        }
+        
+        return @{
+            Success = $true
+            RowCount = $csvData.Count
+            Path = $OutputPath
+        }
+    }
+    catch {
+        Write-Host "[ERROR] Failed to export duplicates to CSV: $($_.Exception.Message)" -ForegroundColor Red
+        return @{
+            Success = $false
+            Message = $_.Exception.Message
+        }
+    }
+}
+
+function Export-SkippedTablesToCSV {
+    param(
+        [array]$SkippedTables,
+        [string]$OutputPath,
+        [string]$Delimiter = $null
+    )
+    
+    try {
+        # Ensure directory exists
+        $outputDir = Split-Path -Parent $OutputPath
+        if (-not (Test-Path $outputDir)) {
+            New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
+        }
+        
+        # Convert to CSV-friendly format
+        $csvData = $SkippedTables | ForEach-Object {
+            [PSCustomObject]@{
+                TableName = $_.TableName
+                Reason = $_.Reason
+                DuplicateGroups = $_.DuplicateGroups
+                TotalDuplicates = $_.TotalDuplicates
+                Timestamp = $_.Timestamp
+            }
+        }
+        
+        # Export to CSV
+        if ($Delimiter) {
+            $csvData | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8 -Delimiter $Delimiter
+        } else {
+            $csvData | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8 -UseCulture
+        }
+        
+        return @{
+            Success = $true
+            RowCount = $csvData.Count
+            Path = $OutputPath
+        }
+    }
+    catch {
+        Write-Host "[ERROR] Failed to export skipped tables to CSV: $($_.Exception.Message)" -ForegroundColor Red
+        return @{
+            Success = $false
+            Message = $_.Exception.Message
+        }
+    }
+}
+
+function Export-ValidationProblemsToCSV {
+    param(
+        [array]$ValidationProblems,
+        [string]$OutputPath,
+        [string]$Delimiter = $null
+    )
+    
+    try {
+        # Ensure directory exists
+        $outputDir = Split-Path -Parent $OutputPath
+        if (-not (Test-Path $outputDir)) {
+            New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
+        }
+        
+        # Convert validation problems to CSV format
+        $csvData = $ValidationProblems | ForEach-Object {
+            [PSCustomObject]@{
+                TableName = $_.TableName
+                ProblemType = $_.Type
+                Message = $_.Message
+                Details = $_.Details
+                Severity = $_.Severity
+                Timestamp = $_.Timestamp
+            }
+        }
+        
+        # Export to CSV
+        if ($Delimiter) {
+            $csvData | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8 -Delimiter $Delimiter
+        } else {
+            $csvData | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8 -UseCulture
+        }
+        
+        return @{
+            Success = $true
+            RowCount = $csvData.Count
+            Path = $OutputPath
+        }
+    }
+    catch {
+        Write-Host "[ERROR] Failed to export validation problems to CSV: $($_.Exception.Message)" -ForegroundColor Red
+        return @{
+            Success = $false
+            Message = $_.Exception.Message
+        }
     }
 }

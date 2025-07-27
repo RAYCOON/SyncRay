@@ -25,6 +25,29 @@ Ein leistungsstarkes PowerShell-basiertes Datenbank-Synchronisierungstool, das n
 
 ## Schnellstart
 
+### Neu: Zentraler SyncRay-Befehl
+
+Der einfachste Weg, SyncRay zu verwenden, ist über das zentrale `syncray.ps1`-Skript:
+
+```powershell
+# Export aus Produktion
+./src/syncray.ps1 -From production
+
+# Import in Entwicklung (Vorschau)
+./src/syncray.ps1 -To development
+
+# Direkte Synchronisierung von Produktion zu Entwicklung
+./src/syncray.ps1 -From production -To development
+
+# Datenqualität analysieren
+./src/syncray.ps1 -From production -Analyze
+
+# Hilfe anzeigen
+./src/syncray.ps1 -Help
+```
+
+### Einrichtungsanleitung
+
 1. **Repository klonen**
    ```bash
    git clone https://github.com/yourusername/SyncRay.git
@@ -51,18 +74,29 @@ Ein leistungsstarkes PowerShell-basiertes Datenbank-Synchronisierungstool, das n
    }
    ```
 
-3. **Daten aus Quelle exportieren**:
+3. **SyncRay verwenden**:
+
+   **Option A: Mit zentralem Skript (empfohlen)**
    ```powershell
+   # Daten exportieren
+   ./src/syncray.ps1 -From prod
+   
+   # Daten importieren (Vorschau)
+   ./src/syncray.ps1 -To dev
+   
+   # Direkte Synchronisierung
+   ./src/syncray.ps1 -From prod -To dev -Execute
+   ```
+
+   **Option B: Mit einzelnen Skripten**
+   ```powershell
+   # Export
    ./src/sync-export.ps1 -From prod
-   ```
-
-4. **Änderungen vorschauen** (Dry-Run):
-   ```powershell
+   
+   # Import (Vorschau)
    ./src/sync-import.ps1 -To dev
-   ```
-
-5. **Änderungen anwenden**:
-   ```powershell
+   
+   # Import (ausführen)
    ./src/sync-import.ps1 -To dev -Execute
    ```
 
@@ -98,6 +132,83 @@ Ein leistungsstarkes PowerShell-basiertes Datenbank-Synchronisierungstool, das n
 - **ignoreColumns**: Spalten, die vom Vergleich ausgeschlossen werden
 - **allowInserts/Updates/Deletes**: Steuerung erlaubter Operationen
 - **exportWhere**: Quelldaten mit SQL WHERE-Klausel filtern
+
+## Befehlsreferenz
+
+### syncray.ps1 (Zentrales Tool)
+
+Der Haupteinstiegspunkt für alle SyncRay-Operationen. Bestimmt automatisch die Operation basierend auf den Parametern.
+
+**Parameter:**
+- `-From <string>`: Quelldatenbank (löst Export-Modus aus)
+- `-To <string>`: Zieldatenbank (löst Import-Modus aus)
+- `-From <string> -To <string>`: Beide (löst Sync-Modus aus)
+- `-Analyze`: Datenqualität analysieren ohne zu exportieren
+- `-Validate`: Konfiguration validieren ohne Verarbeitung
+- `-Execute`: Änderungen anwenden (für Import-/Sync-Modi)
+- `-SkipOnDuplicates`: Tabellen mit doppelten Datensätzen überspringen
+- `-CreateReports`: CSV-Berichte für Probleme erstellen
+- `-ReportPath <string>`: Benutzerdefinierter Pfad für CSV-Berichte
+- `-CsvDelimiter <string>`: CSV-Trennzeichen
+- `-ShowSQL`: SQL-Anweisungen für Debugging anzeigen
+- `-Help`: Hilfeinformationen anzeigen
+
+**Beispiele:**
+```powershell
+# Export-Modus
+./src/syncray.ps1 -From production
+
+# Import-Modus (Vorschau)
+./src/syncray.ps1 -To development
+
+# Sync-Modus (direkte Übertragung)
+./src/syncray.ps1 -From production -To development -Execute
+
+# Analyse-Modus
+./src/syncray.ps1 -From production -Analyze
+```
+
+### sync-export.ps1
+
+Exportiert Daten aus der Quelldatenbank in JSON-Dateien.
+
+**Parameter:**
+- `-From <string>` (erforderlich): Quelldatenbank-Schlüssel aus Konfiguration
+- `-ConfigFile <string>`: Pfad zur Konfigurationsdatei (Standard: sync-config.json)
+- `-Tables <string>`: Kommagetrennte Liste spezifischer zu exportierender Tabellen
+- `-Analyze`: Analysiert Datenqualität und erstellt Berichte ohne zu exportieren
+- `-Validate`: Validiert Konfiguration und Daten ohne Export oder Berichte
+- `-SkipOnDuplicates`: Überspringt automatisch Tabellen mit doppelten Datensätzen
+- `-CreateReports`: Erstellt CSV-Berichte für Datenqualitätsprobleme
+- `-ReportPath <string>`: Benutzerdefinierter Pfad für CSV-Berichte
+- `-CsvDelimiter <string>`: CSV-Trennzeichen (Standard: kulturspezifisch)
+- `-ShowSQL`: Zeigt SQL-Anweisungen und detaillierte Debug-Informationen
+
+**Verwendungsbeispiele:**
+```powershell
+# Standard-Export
+./src/sync-export.ps1 -From prod
+
+# Export mit Problemberichten
+./src/sync-export.ps1 -From prod -CreateReports
+
+# Nur Datenqualität analysieren
+./src/sync-export.ps1 -From prod -Analyze
+
+# Spezifische Tabellen mit SQL-Debug-Ausgabe exportieren
+./src/sync-export.ps1 -From prod -Tables "Users,Orders" -ShowSQL
+```
+
+### sync-import.ps1
+
+Importiert Daten aus JSON-Dateien in die Zieldatenbank.
+
+**Parameter:**
+- `-To <string>` (erforderlich): Zieldatenbank-Schlüssel aus Konfiguration
+- `-ConfigFile <string>`: Pfad zur Konfigurationsdatei (Standard: sync-config.json)
+- `-Tables <string>`: Kommagetrennte Liste spezifischer zu importierender Tabellen
+- `-Execute`: Änderungen anwenden (Standard ist Dry-Run)
+- `-ShowSQL`: SQL-Anweisungen für Debugging anzeigen
 
 ## Sicherheitsfunktionen
 

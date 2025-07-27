@@ -48,3 +48,5 @@ sync-config.prod.json
 test-results/
 test-data/
 /src/sync-config.json
+/src/analysis/
+/src/reports/

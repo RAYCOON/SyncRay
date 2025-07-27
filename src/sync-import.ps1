@@ -1,6 +1,7 @@
 # sync-import.ps1 - Import/sync tables to target database
+[CmdletBinding(DefaultParameterSetName='Import')]
 param(
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory=$true, ParameterSetName='Import')]
     [string]$To,
     
     [Parameter(Mandatory=$false)]
@@ -13,8 +14,84 @@ param(
     [switch]$Execute,  # Actually perform the sync (default is dry-run)
     
     [Parameter(Mandatory=$false)]
-    [switch]$ShowSQL  # Show SQL statements for debugging
+    [switch]$ShowSQL,  # Show SQL statements for debugging
+    
+    [Parameter(Mandatory=$false, ParameterSetName='Help')]
+    [switch]$Help  # Show help information
 )
+
+# Show help if requested
+if ($Help) {
+    Write-Host @"
+`n=== SYNC-IMPORT HELP ===
+
+DESCRIPTION:
+    Imports data from JSON files to target database for synchronization.
+    Supports dry-run preview and transactional execution.
+
+SYNTAX:
+    sync-import.ps1 -To <database> [options]
+
+PARAMETERS:
+    -To <string> (required)
+        Target database key from configuration file
+        
+    -ConfigFile <string>
+        Path to configuration file (default: sync-config.json)
+        
+    -Tables <string>
+        Comma-separated list of specific tables to import
+        Example: -Tables "Users,Orders,Products"
+        
+    -Execute
+        Apply changes to database (default is dry-run preview)
+        Requires explicit confirmation before execution
+        
+    -ShowSQL
+        Show SQL statements and detailed debugging information
+        
+    -Help
+        Show this help message
+
+OPERATION MODES:
+    1. Dry-Run Mode (default)
+       Preview all changes without modifying database
+       Shows INSERT, UPDATE, DELETE counts per table
+       
+    2. Execute Mode (-Execute)
+       Apply changes to database with confirmation
+       All changes wrapped in transaction
+       Automatic rollback on any error
+
+SAFETY FEATURES:
+    - Validation before any operation
+    - Dry-run by default
+    - Explicit confirmation required for execution
+    - Transaction rollback on errors
+    - Detailed change preview
+
+EXAMPLES:
+    # Preview changes (dry-run)
+    sync-import.ps1 -To development
+    
+    # Apply changes with confirmation
+    sync-import.ps1 -To development -Execute
+    
+    # Import specific tables with SQL debug
+    sync-import.ps1 -To development -Tables "Users,Orders" -ShowSQL
+    
+    # Import from custom config
+    sync-import.ps1 -To staging -ConfigFile staging-config.json
+
+DATA FLOW:
+    1. Reads JSON files from sync-data/ directory
+    2. Validates data against target database schema
+    3. Calculates required changes (INSERT/UPDATE/DELETE)
+    4. Shows preview or executes changes
+
+"@ -ForegroundColor Cyan
+    exit 0
+}
 
 # Load validation functions
 . (Join-Path $PSScriptRoot "sync-validation.ps1")
