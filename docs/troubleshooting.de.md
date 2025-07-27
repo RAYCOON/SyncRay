@@ -62,6 +62,12 @@
   HAVING COUNT(*) > 1
   ```
 
+**Beim Export**:
+- Sie werden gefragt, ob Sie fortfahren oder überspringen möchten, wenn Duplikate gefunden werden
+- Bei Fortsetzung werden Duplikate nach matchOn-Feldern gruppiert
+- Nur ein Datensatz pro eindeutiger Kombination wird exportiert
+- Verwenden Sie `-NonInteractive` um Tabellen mit Duplikaten automatisch zu überspringen
+
 ### Ausführungsfehler
 
 #### "IDENTITY_INSERT ist auf OFF gesetzt"

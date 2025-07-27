@@ -54,6 +54,12 @@ A powerful PowerShell-based database synchronization tool that enables seamless 
 3. **Export data from source**:
    ```powershell
    ./src/sync-export.ps1 -From prod
+   
+   # With debug output
+   ./src/sync-export.ps1 -From prod -ShowSQL
+   
+   # Non-interactive mode (auto-skip tables with duplicates)
+   ./src/sync-export.ps1 -From prod -NonInteractive
    ```
 
 4. **Preview changes** (dry-run):

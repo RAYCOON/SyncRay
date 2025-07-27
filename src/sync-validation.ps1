@@ -250,10 +250,12 @@ function Test-SyncConfiguration {
                 # Get table columns
                 $columns = Get-TableColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
                 
+                # Get primary keys first (needed for detailed duplicate output)
+                $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
+                
                 # Handle empty matchOn - try to use primary key
                 if (-not $syncTable.matchOn -or $syncTable.matchOn.Count -eq 0) {
                     Write-Host "  No matchOn specified, checking primary key..." -ForegroundColor Gray -NoNewline
-                    $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
                     
                     # Filter out ignored columns
                     $usableKeys = @()
@@ -289,22 +291,36 @@ function Test-SyncConfiguration {
                     # Check uniqueness of matchOn fields
                     Write-Host "  Checking matchOn uniqueness..." -ForegroundColor Gray -NoNewline
                     $whereClause = if ($Mode -eq "export" -and $syncTable.exportWhere) { $syncTable.exportWhere } else { "" }
-                    $uniquenessTest = Test-MatchFieldsUniqueness -Connection $connection -TableName $tableName -MatchFields $syncTable.matchOn -WhereClause $whereClause -ShowSQL:$ShowSQL
+                    $uniquenessTest = Test-MatchFieldsUniqueness -Connection $connection -TableName $tableName -MatchFields $syncTable.matchOn -WhereClause $whereClause -ShowSQL:$ShowSQL -PrimaryKeys $primaryKeys
                     
                     if ($uniquenessTest.HasDuplicates) {
-                        Write-Host " ✗" -ForegroundColor Red
-                        $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
-                        $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
-                        $sqlInfo = if ($ShowSQL -and $uniquenessTest.SqlStatement) { "`nSQL: $($uniquenessTest.SqlStatement)" } else { "" }
-                        $errors += "Table '$tableName': matchOn fields [$($syncTable.matchOn -join ', ')] produce $($uniquenessTest.TotalDuplicates) duplicate(s)$pkInfo$sqlInfo"
+                        # During export, duplicates are warnings not errors (will be handled table-by-table)
+                        if ($Mode -eq "export") {
+                            Write-Host " ⚠" -ForegroundColor Yellow
+                            $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
+                            $warnings += "Table '$tableName': matchOn fields [$($syncTable.matchOn -join ', ')] produce $($uniquenessTest.TotalDuplicates) duplicate(s)$pkInfo - will prompt during export"
+                        } else {
+                            Write-Host " ✗" -ForegroundColor Red
+                            $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
+                            $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
+                            $sqlInfo = if ($ShowSQL -and $uniquenessTest.SqlStatement) { "`nSQL: $($uniquenessTest.SqlStatement)" } else { "" }
+                            $errors += "Table '$tableName': matchOn fields [$($syncTable.matchOn -join ', ')] produce $($uniquenessTest.TotalDuplicates) duplicate(s)$pkInfo$sqlInfo"
+                        }
                         
                         # Show examples
                         if ($uniquenessTest.Examples) {
-                            Write-Host "    Example duplicates:" -ForegroundColor Red
+                            $exampleColor = if ($Mode -eq "export") { "Yellow" } else { "Red" }
+                            Write-Host "    Example duplicates:" -ForegroundColor $exampleColor
                             foreach ($example in $uniquenessTest.Examples | Select-Object -First 3) {
                                 $valueDisplay = ($example.Values.GetEnumerator() | ForEach-Object { "$($_.Key)='$($_.Value)'" }) -join ", "
-                                Write-Host "    - $valueDisplay ($($example.Count) occurrences)" -ForegroundColor Red
+                                Write-Host "    - $valueDisplay ($($example.Count) occurrences)" -ForegroundColor $exampleColor
                             }
+                        }
+                        
+                        # Show detailed duplicate table if available
+                        if ($uniquenessTest.DetailedDuplicates) {
+                            Write-Host "`n    Detailed duplicate records (max 200 rows):" -ForegroundColor Yellow
+                            Write-Host $uniquenessTest.DetailedDuplicates -ForegroundColor Gray
                         }
                     } elseif ($uniquenessTest.Error) {
                         Write-Host " ⚠" -ForegroundColor Yellow
@@ -407,7 +423,8 @@ function Test-MatchFieldsUniqueness {
         [string]$TableName,
         [string[]]$MatchFields,
         [string]$WhereClause = "",
-        [switch]$ShowSQL
+        [switch]$ShowSQL,
+        [string[]]$PrimaryKeys = @()  # Primary key columns for detailed output
     )
     
     try {
@@ -495,6 +512,14 @@ SELECT * FROM DuplicateExamples
             $reader.Close()
             
             $duplicateInfo.Examples = $examples
+            
+            # Get detailed duplicate records with primary keys
+            if ($PrimaryKeys.Count -gt 0) {
+                $detailedDuplicates = Get-DetailedDuplicateRecords -Connection $Connection -TableName $TableName -MatchFields $MatchFields -PrimaryKeys $PrimaryKeys -WhereClause $WhereClause -ShowSQL:$ShowSQL
+                if ($detailedDuplicates) {
+                    $duplicateInfo.DetailedDuplicates = $detailedDuplicates
+                }
+            }
         }
         
         if ($ShowSQL) {
@@ -511,5 +536,115 @@ SELECT * FROM DuplicateExamples
             $result.SqlStatement = $sqlStatement
         }
         return $result
+    }
+}
+
+function Get-DetailedDuplicateRecords {
+    param(
+        [System.Data.SqlClient.SqlConnection]$Connection,
+        [string]$TableName,
+        [string[]]$MatchFields,
+        [string[]]$PrimaryKeys,
+        [string]$WhereClause = "",
+        [switch]$ShowSQL
+    )
+    
+    try {
+        # Build column lists
+        $matchColumns = $MatchFields | ForEach-Object { "[$_]" }
+        $primaryColumns = $PrimaryKeys | ForEach-Object { "[$_]" }
+        $allColumns = @()
+        foreach ($col in $primaryColumns) {
+            $allColumns += $col
+        }
+        foreach ($col in $matchColumns) {
+            if ($col -notin $primaryColumns) {
+                $allColumns += $col
+            }
+        }
+        
+        # Build NULL-safe join conditions
+        $joinConditions = @()
+        foreach ($field in $MatchFields) {
+            $joinConditions += "(st.[$field] = dg.[$field] OR (st.[$field] IS NULL AND dg.[$field] IS NULL))"
+        }
+        $joinClause = $joinConditions -join "`n                        AND "
+        
+        # Build the query
+        $whereFilter = if ($WhereClause) { "WHERE $WhereClause" } else { "" }
+        $detailQuery = @"
+WITH DuplicateGroups AS (
+    SELECT 
+        $($matchColumns -join ",`n        "),
+        ROW_NUMBER() OVER (ORDER BY $($matchColumns -join ", ")) as GroupNumber
+    FROM [$TableName]
+    $whereFilter
+    GROUP BY
+        $($matchColumns -join ",`n        ")
+    HAVING COUNT(*) > 1
+)
+SELECT TOP 200
+    st.$($allColumns -join ",`n    st."),
+    dg.GroupNumber as DuplicateGroup
+FROM [$TableName] st
+    INNER JOIN DuplicateGroups dg
+        ON $joinClause
+ORDER BY
+    dg.GroupNumber,
+    $($primaryColumns -join ", ")
+"@
+        
+        if ($ShowSQL) {
+            Write-Host "[DEBUG] Getting detailed duplicate records:" -ForegroundColor DarkCyan
+            Write-Host $detailQuery -ForegroundColor DarkGray
+        }
+        
+        $cmd = $Connection.CreateCommand()
+        $cmd.CommandText = $detailQuery
+        $cmd.CommandTimeout = 60
+        
+        $reader = $cmd.ExecuteReader()
+        $results = @()
+        
+        # Get column names in desired order
+        $columnNames = @()
+        # Add primary key columns first
+        foreach ($pk in $PrimaryKeys) {
+            $columnNames += $pk
+        }
+        # Add match fields that aren't already in primary keys
+        foreach ($mf in $MatchFields) {
+            if ($mf -notin $PrimaryKeys) {
+                $columnNames += $mf
+            }
+        }
+        # Add DuplicateGroup column
+        $columnNames += "DuplicateGroup"
+        
+        # Read data
+        while ($reader.Read()) {
+            $row = New-Object PSObject
+            foreach ($colName in $columnNames) {
+                $value = if ($reader[$colName] -eq [DBNull]::Value) { "NULL" } else { $reader[$colName] }
+                $row | Add-Member -NotePropertyName $colName -NotePropertyValue $value
+            }
+            $results += $row
+        }
+        $reader.Close()
+        
+        if ($results.Count -eq 0) {
+            return $null
+        }
+        
+        # Format as table with proper column layout
+        $tableOutput = $results | Format-Table -Property * -AutoSize -Wrap | Out-String -Width 300
+        return $tableOutput
+        
+    }
+    catch {
+        if ($ShowSQL) {
+            Write-Host "[DEBUG] Error getting detailed duplicates: $_" -ForegroundColor Red
+        }
+        return $null
     }
 }

@@ -10,11 +10,20 @@ param(
     [string]$Tables,  # Comma-separated list of specific tables
     
     [Parameter(Mandatory=$false)]
-    [switch]$ShowSQL  # Show SQL statements for debugging
+    [switch]$ShowSQL,  # Show SQL statements for debugging
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$NonInteractive  # Skip prompts and automatically skip tables with duplicates
 )
 
 # Load validation functions
 . (Join-Path $PSScriptRoot "sync-validation.ps1")
+
+# Load Get-PrimaryKeyColumns function
+if (-not (Get-Command -Name Get-PrimaryKeyColumns -ErrorAction SilentlyContinue)) {
+    Write-Host "[ERROR] Required validation functions not loaded" -ForegroundColor Red
+    exit 1
+}
 
 # Load configuration
 $configPath = Join-Path $PSScriptRoot $ConfigFile
@@ -80,7 +89,7 @@ try {
     $connection.Open()
     
     foreach ($tableName in $tablesToExport) {
-        Write-Host "Exporting $tableName..." -ForegroundColor Yellow -NoNewline
+        Write-Host "Processing $tableName..." -ForegroundColor Yellow -NoNewline
         
         # Find table configs (can be multiple if source is mapped to different targets)
         $tableConfigs = $config.syncTables | Where-Object { $_.sourceTable -eq $tableName }
@@ -91,6 +100,9 @@ try {
         
         # Use first config for export metadata (they should all have same source settings)
         $tableConfig = $tableConfigs[0]
+        
+        # Get primary key columns for the table (needed for duplicate check)
+        $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
         
         # If matchOn is not specified, get primary key
         if (-not $tableConfig.matchOn -or $tableConfig.matchOn.Count -eq 0) {
@@ -116,20 +128,21 @@ ORDER BY ku.ORDINAL_POSITION
                 Write-Host "[DEBUG] Parameters: @TableName = '$tableName'" -ForegroundColor DarkCyan
             }
             
-            $primaryKeys = @()
+            # Read primary keys from query (for matchOn detection)
+            $matchOnKeys = @()
             $pkReader = $pkCmd.ExecuteReader()
             while ($pkReader.Read()) {
-                $primaryKeys += $pkReader["COLUMN_NAME"]
+                $matchOnKeys += $pkReader["COLUMN_NAME"]
             }
             $pkReader.Close()
             
-            if ($primaryKeys.Count -gt 0) {
+            if ($matchOnKeys.Count -gt 0) {
                 # Filter out ignored columns
                 $usableKeys = @()
                 if ($tableConfig.ignoreColumns) {
-                    $usableKeys = $primaryKeys | Where-Object { $_ -notin $tableConfig.ignoreColumns }
+                    $usableKeys = $matchOnKeys | Where-Object { $_ -notin $tableConfig.ignoreColumns }
                 } else {
-                    $usableKeys = $primaryKeys
+                    $usableKeys = $matchOnKeys
                 }
                 
                 if ($usableKeys.Count -gt 0) {
@@ -144,6 +157,59 @@ ORDER BY ku.ORDINAL_POSITION
                 continue
             }
         }
+        
+        # Check for duplicates based on matchOn fields
+        Write-Host " checking duplicates..." -ForegroundColor DarkGray -NoNewline
+        $whereClause = if ($tableConfig.exportWhere) { $tableConfig.exportWhere } else { "" }
+        $uniquenessTest = Test-MatchFieldsUniqueness -Connection $connection -TableName $tableName -MatchFields $tableConfig.matchOn -WhereClause $whereClause -ShowSQL:$ShowSQL -PrimaryKeys $primaryKeys
+        
+        if ($uniquenessTest.HasDuplicates) {
+            Write-Host " [DUPLICATES FOUND]" -ForegroundColor Red
+            Write-Host "    Found $($uniquenessTest.TotalDuplicates) duplicate records in $($uniquenessTest.DuplicateGroups) groups" -ForegroundColor Yellow
+            
+            # Show examples
+            if ($uniquenessTest.Examples) {
+                Write-Host "    Example duplicates:" -ForegroundColor Yellow
+                foreach ($example in $uniquenessTest.Examples | Select-Object -First 3) {
+                    $valueDisplay = ($example.Values.GetEnumerator() | ForEach-Object { "$($_.Key)='$($_.Value)'" }) -join ", "
+                    Write-Host "    - $valueDisplay ($($example.Count) occurrences)" -ForegroundColor Yellow
+                }
+            }
+            
+            # Show detailed duplicate table if available
+            if ($uniquenessTest.DetailedDuplicates) {
+                Write-Host "`n    Detailed duplicate records (max 200 rows):" -ForegroundColor Yellow
+                Write-Host $uniquenessTest.DetailedDuplicates -ForegroundColor Gray
+            }
+            
+            # Prompt user or skip based on NonInteractive mode
+            if ($NonInteractive) {
+                Write-Host "    [SKIP] Skipping table due to duplicates (NonInteractive mode)" -ForegroundColor Red
+                continue
+            } else {
+                Write-Host "`n    Duplicates will be grouped by matchOn fields during export." -ForegroundColor Cyan
+                Write-Host "    Only one record per unique combination will be exported." -ForegroundColor Cyan
+                $response = Read-Host "`n    Continue with export? (y=yes, n=no/skip, a=abort all)"
+                
+                if ($response -eq 'a' -or $response -eq 'A') {
+                    Write-Host "`n[ABORTED] Export cancelled by user" -ForegroundColor Red
+                    if ($connection.State -eq 'Open') {
+                        $connection.Close()
+                    }
+                    exit 0
+                }
+                elseif ($response -ne 'y' -and $response -ne 'Y') {
+                    Write-Host "    [SKIP] Skipping table at user request" -ForegroundColor Yellow
+                    continue
+                }
+                Write-Host "    Continuing with export..." -ForegroundColor Green
+            }
+        } else {
+            Write-Host " [OK]" -ForegroundColor Green
+        }
+        
+        # Now actually export the table
+        Write-Host "Exporting $tableName..." -ForegroundColor Yellow -NoNewline
         
         # Get table schema
         $schemaCmd = $connection.CreateCommand()

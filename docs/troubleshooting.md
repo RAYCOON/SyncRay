@@ -62,6 +62,12 @@
   HAVING COUNT(*) > 1
   ```
 
+**During Export**:
+- You'll be prompted to continue or skip when duplicates are found
+- If you continue, duplicates will be grouped by matchOn fields
+- Only one record per unique combination will be exported
+- Use `-NonInteractive` to automatically skip tables with duplicates
+
 ### Execution Errors
 
 #### "IDENTITY_INSERT is set to OFF"
