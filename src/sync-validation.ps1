@@ -46,12 +46,20 @@ function Test-DatabaseConnection {
 function Test-TableExists {
     param(
         [System.Data.SqlClient.SqlConnection]$Connection,
-        [string]$TableName
+        [string]$TableName,
+        [switch]$ShowSQL
     )
     
     $cmd = $Connection.CreateCommand()
-    $cmd.CommandText = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = @TableName"
+    $query = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = @TableName"
+    $cmd.CommandText = $query
     $cmd.Parameters.AddWithValue("@TableName", $TableName) | Out-Null
+    
+    if ($ShowSQL) {
+        Write-Host "[DEBUG] Checking table existence:" -ForegroundColor DarkCyan
+        Write-Host $query -ForegroundColor DarkGray
+        Write-Host "[DEBUG] Parameters: @TableName = '$TableName'" -ForegroundColor DarkCyan
+    }
     
     $exists = $cmd.ExecuteScalar() -gt 0
     return $exists
@@ -60,18 +68,26 @@ function Test-TableExists {
 function Get-TableColumns {
     param(
         [System.Data.SqlClient.SqlConnection]$Connection,
-        [string]$TableName
+        [string]$TableName,
+        [switch]$ShowSQL
     )
     
     $cmd = $Connection.CreateCommand()
-    $cmd.CommandText = @"
+    $query = @"
 SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE,
        COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IS_IDENTITY
 FROM INFORMATION_SCHEMA.COLUMNS 
 WHERE TABLE_NAME = @TableName
 ORDER BY ORDINAL_POSITION
 "@
+    $cmd.CommandText = $query
     $cmd.Parameters.AddWithValue("@TableName", $TableName) | Out-Null
+    
+    if ($ShowSQL) {
+        Write-Host "[DEBUG] Getting table columns:" -ForegroundColor DarkCyan
+        Write-Host $query -ForegroundColor DarkGray
+        Write-Host "[DEBUG] Parameters: @TableName = '$TableName'" -ForegroundColor DarkCyan
+    }
     
     $columns = @{}
     $reader = $cmd.ExecuteReader()
@@ -90,11 +106,12 @@ ORDER BY ORDINAL_POSITION
 function Get-PrimaryKeyColumns {
     param(
         [System.Data.SqlClient.SqlConnection]$Connection,
-        [string]$TableName
+        [string]$TableName,
+        [switch]$ShowSQL
     )
     
     $cmd = $Connection.CreateCommand()
-    $cmd.CommandText = @"
+    $query = @"
 SELECT ku.COLUMN_NAME
 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
 JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
@@ -103,7 +120,14 @@ JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
 WHERE ku.TABLE_NAME = @TableName
 ORDER BY ku.ORDINAL_POSITION
 "@
+    $cmd.CommandText = $query
     $cmd.Parameters.AddWithValue("@TableName", $TableName) | Out-Null
+    
+    if ($ShowSQL) {
+        Write-Host "[DEBUG] Getting primary key columns:" -ForegroundColor DarkCyan
+        Write-Host $query -ForegroundColor DarkGray
+        Write-Host "[DEBUG] Parameters: @TableName = '$TableName'" -ForegroundColor DarkCyan
+    }
     
     $primaryKeys = @()
     $reader = $cmd.ExecuteReader()
@@ -119,13 +143,21 @@ function Test-WhereClause {
     param(
         [System.Data.SqlClient.SqlConnection]$Connection,
         [string]$TableName,
-        [string]$WhereClause
+        [string]$WhereClause,
+        [switch]$ShowSQL
     )
     
     try {
         $cmd = $Connection.CreateCommand()
         # Use TOP 0 to test syntax without returning data
-        $cmd.CommandText = "SELECT TOP 0 * FROM [$TableName] WHERE $WhereClause"
+        $sqlStatement = "SELECT TOP 0 * FROM [$TableName] WHERE $WhereClause"
+        $cmd.CommandText = $sqlStatement
+        
+        if ($ShowSQL) {
+            Write-Host "[DEBUG] Testing WHERE clause:" -ForegroundColor DarkCyan
+            Write-Host $sqlStatement -ForegroundColor DarkGray
+        }
+        
         $cmd.ExecuteReader().Close()
         
         return @{
@@ -134,9 +166,14 @@ function Test-WhereClause {
         }
     }
     catch {
+        $sqlStatement = "SELECT TOP 0 * FROM [$TableName] WHERE $WhereClause"
+        $message = "Invalid WHERE clause: $($_.Exception.Message)"
+        if ($ShowSQL) {
+            $message += "`nSQL: $sqlStatement"
+        }
         return @{
             Success = $false
-            Message = "Invalid WHERE clause: $($_.Exception.Message)"
+            Message = $message
         }
     }
 }
@@ -145,7 +182,8 @@ function Test-SyncConfiguration {
     param(
         [PSCustomObject]$Config,
         [string]$DatabaseKey,
-        [string]$Mode  # "export" or "import"
+        [string]$Mode,  # "export" or "import"
+        [switch]$ShowSQL  # Show SQL statements for debugging
     )
     
     Write-Host "`n=== CONFIGURATION VALIDATION ===" -ForegroundColor Cyan
@@ -206,16 +244,16 @@ function Test-SyncConfiguration {
             
             # Check if table exists
             Write-Host "  Checking table existence..." -ForegroundColor Gray -NoNewline
-            if (Test-TableExists -Connection $connection -TableName $tableName) {
+            if (Test-TableExists -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL) {
                 Write-Host " ✓" -ForegroundColor Green
                 
                 # Get table columns
-                $columns = Get-TableColumns -Connection $connection -TableName $tableName
+                $columns = Get-TableColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
                 
                 # Handle empty matchOn - try to use primary key
                 if (-not $syncTable.matchOn -or $syncTable.matchOn.Count -eq 0) {
                     Write-Host "  No matchOn specified, checking primary key..." -ForegroundColor Gray -NoNewline
-                    $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName
+                    $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
                     
                     # Filter out ignored columns
                     $usableKeys = @()
@@ -230,7 +268,8 @@ function Test-SyncConfiguration {
                         $syncTable | Add-Member -NotePropertyName "matchOn" -NotePropertyValue $usableKeys -Force
                     } else {
                         Write-Host " ✗" -ForegroundColor Red
-                        $errors += "Table '$tableName': No matchOn fields specified and primary key columns are ignored"
+                        $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
+                        $errors += "Table '$tableName': No matchOn fields specified and primary key columns are ignored$pkInfo"
                         continue
                     }
                 }
@@ -250,11 +289,14 @@ function Test-SyncConfiguration {
                     # Check uniqueness of matchOn fields
                     Write-Host "  Checking matchOn uniqueness..." -ForegroundColor Gray -NoNewline
                     $whereClause = if ($Mode -eq "export" -and $syncTable.exportWhere) { $syncTable.exportWhere } else { "" }
-                    $uniquenessTest = Test-MatchFieldsUniqueness -Connection $connection -TableName $tableName -MatchFields $syncTable.matchOn -WhereClause $whereClause
+                    $uniquenessTest = Test-MatchFieldsUniqueness -Connection $connection -TableName $tableName -MatchFields $syncTable.matchOn -WhereClause $whereClause -ShowSQL:$ShowSQL
                     
                     if ($uniquenessTest.HasDuplicates) {
                         Write-Host " ✗" -ForegroundColor Red
-                        $errors += "Table '$tableName': matchOn fields [$($syncTable.matchOn -join ', ')] produce $($uniquenessTest.TotalDuplicates) duplicate(s)"
+                        $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
+                        $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
+                        $sqlInfo = if ($ShowSQL -and $uniquenessTest.SqlStatement) { "`nSQL: $($uniquenessTest.SqlStatement)" } else { "" }
+                        $errors += "Table '$tableName': matchOn fields [$($syncTable.matchOn -join ', ')] produce $($uniquenessTest.TotalDuplicates) duplicate(s)$pkInfo$sqlInfo"
                         
                         # Show examples
                         if ($uniquenessTest.Examples) {
@@ -272,7 +314,9 @@ function Test-SyncConfiguration {
                     }
                 } else {
                     Write-Host " ✗" -ForegroundColor Red
-                    $errors += "Table '$tableName': Match fields not found: $($missingMatchFields -join ', ')"
+                    $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
+                    $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
+                    $errors += "Table '$tableName': Match fields not found: $($missingMatchFields -join ', ')$pkInfo"
                 }
                 
                 # Validate ignoreColumns if specified
@@ -296,7 +340,7 @@ function Test-SyncConfiguration {
                 # Validate exportWhere clause if in export mode
                 if ($Mode -eq "export" -and $syncTable.exportWhere) {
                     Write-Host "  Checking WHERE clause..." -ForegroundColor Gray -NoNewline
-                    $whereTest = Test-WhereClause -Connection $connection -TableName $tableName -WhereClause $syncTable.exportWhere
+                    $whereTest = Test-WhereClause -Connection $connection -TableName $tableName -WhereClause $syncTable.exportWhere -ShowSQL:$ShowSQL
                     if ($whereTest.Success) {
                         Write-Host " ✓" -ForegroundColor Green
                     } else {
@@ -315,7 +359,12 @@ function Test-SyncConfiguration {
                 
             } else {
                 Write-Host " ✗" -ForegroundColor Red
-                $errors += "Table '$tableName' not found in database"
+                $sqlStatement = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '$tableName'"
+                $errorMsg = "Table '$tableName' not found in database"
+                if ($ShowSQL) {
+                    $errorMsg += "`nSQL: $sqlStatement"
+                }
+                $errors += $errorMsg
             }
         }
         
@@ -357,7 +406,8 @@ function Test-MatchFieldsUniqueness {
         [System.Data.SqlClient.SqlConnection]$Connection,
         [string]$TableName,
         [string[]]$MatchFields,
-        [string]$WhereClause = ""
+        [string]$WhereClause = "",
+        [switch]$ShowSQL
     )
     
     try {
@@ -372,7 +422,7 @@ function Test-MatchFieldsUniqueness {
         $whereFilter = if ($WhereClause) { "WHERE $WhereClause" } else { "" }
         
         $cmd = $Connection.CreateCommand()
-        $cmd.CommandText = @"
+        $sqlStatement = @"
 WITH DuplicateCheck AS (
     SELECT $concatExpression as MatchKey,
            COUNT(*) as OccurrenceCount
@@ -385,6 +435,12 @@ SELECT COUNT(*) as DuplicateGroups,
        SUM(OccurrenceCount - 1) as TotalDuplicates
 FROM DuplicateCheck
 "@
+        $cmd.CommandText = $sqlStatement
+        
+        if ($ShowSQL) {
+            Write-Host "[DEBUG] Checking uniqueness:" -ForegroundColor DarkCyan
+            Write-Host $sqlStatement -ForegroundColor DarkGray
+        }
         
         $reader = $cmd.ExecuteReader()
         $hasDuplicates = $false
@@ -405,7 +461,7 @@ FROM DuplicateCheck
         if ($duplicateInfo.HasDuplicates) {
             $cmd = $Connection.CreateCommand()
             $selectFields = ($MatchFields | ForEach-Object { "[$_]" }) -join ", "
-            $cmd.CommandText = @"
+            $exampleQuery = @"
 WITH DuplicateExamples AS (
     SELECT TOP 5 $selectFields, 
            COUNT(*) as OccurrenceCount
@@ -417,6 +473,12 @@ WITH DuplicateExamples AS (
 )
 SELECT * FROM DuplicateExamples
 "@
+            $cmd.CommandText = $exampleQuery
+            
+            if ($ShowSQL) {
+                Write-Host "[DEBUG] Getting duplicate examples:" -ForegroundColor DarkCyan
+                Write-Host $exampleQuery -ForegroundColor DarkGray
+            }
             
             $examples = @()
             $reader = $cmd.ExecuteReader()
@@ -435,12 +497,19 @@ SELECT * FROM DuplicateExamples
             $duplicateInfo.Examples = $examples
         }
         
+        if ($ShowSQL) {
+            $duplicateInfo.SqlStatement = $sqlStatement
+        }
         return $duplicateInfo
     }
     catch {
-        return @{
+        $result = @{
             HasDuplicates = $false
             Error = $_.Exception.Message
         }
+        if ($ShowSQL) {
+            $result.SqlStatement = $sqlStatement
+        }
+        return $result
     }
 }

@@ -35,5 +35,7 @@
   
   "exportPath": "./sync-data",
   "defaultDryRun": true,
-  "batchSize": 1000
+  "batchSize": 1000,
+  
+  "_comment": "Use -ShowSQL flag with sync-export.ps1 or sync-import.ps1 to enable detailed SQL logging and debug output"
 }

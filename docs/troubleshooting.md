@@ -149,9 +149,17 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 To get more detailed error information:
 
-1. **Enable SQL Profiler** to see actual queries
-2. **Check SQL Server Error Log** for detailed messages
-3. **Add verbose output** to scripts:
+1. **Use -ShowSQL flag** to see all SQL queries and parameters:
+   ```powershell
+   ./src/sync-export.ps1 -From source -ShowSQL
+   ./src/sync-import.ps1 -To target -ShowSQL
+   ```
+
+2. **Enable SQL Profiler** to see actual queries from SQL Server perspective
+
+3. **Check SQL Server Error Log** for detailed messages
+
+4. **Add verbose output** to scripts:
    ```powershell
    $VerbosePreference = "Continue"
    ./src/sync-export.ps1 -From source -Verbose

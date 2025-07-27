@@ -7,7 +7,10 @@ param(
     [string]$ConfigFile = "sync-config.json",
     
     [Parameter(Mandatory=$false)]
-    [string]$Tables  # Comma-separated list of specific tables
+    [string]$Tables,  # Comma-separated list of specific tables
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$ShowSQL  # Show SQL statements for debugging
 )
 
 # Load validation functions
@@ -39,8 +42,15 @@ if (-not (Test-Path $exportPath)) {
 # Build connection string
 if ($sourceDb.auth -eq "sql") {
     $connectionString = "Server=$($sourceDb.server);Database=$($sourceDb.database);User ID=$($sourceDb.user);Password=$($sourceDb.password);"
+    if ($ShowSQL) {
+        $maskedPassword = "*" * ($sourceDb.password.Length)
+        Write-Host "[DEBUG] Connection: Server=$($sourceDb.server);Database=$($sourceDb.database);User ID=$($sourceDb.user);Password=$maskedPassword" -ForegroundColor DarkCyan
+    }
 } else {
     $connectionString = "Server=$($sourceDb.server);Database=$($sourceDb.database);Integrated Security=True;"
+    if ($ShowSQL) {
+        Write-Host "[DEBUG] Connection: Server=$($sourceDb.server);Database=$($sourceDb.database);Integrated Security=True" -ForegroundColor DarkCyan
+    }
 }
 
 Write-Host "`n=== SYNC EXPORT ===" -ForegroundColor Cyan
@@ -48,7 +58,7 @@ Write-Host "Source: $From ($($sourceDb.server))" -ForegroundColor White
 Write-Host "Tables: $(if ($Tables) { $Tables } else { 'All configured' })" -ForegroundColor White
 
 # Run validation before proceeding
-$validation = Test-SyncConfiguration -Config $config -DatabaseKey $From -Mode "export"
+$validation = Test-SyncConfiguration -Config $config -DatabaseKey $From -Mode "export" -ShowSQL:$ShowSQL
 if (-not $validation.Success) {
     Write-Host "`n[ABORTED] Configuration validation failed" -ForegroundColor Red
     exit 1
@@ -88,7 +98,7 @@ try {
             
             # Get primary key columns
             $pkCmd = $connection.CreateCommand()
-            $pkCmd.CommandText = @"
+            $pkQuery = @"
 SELECT ku.COLUMN_NAME
 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
 JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
@@ -97,7 +107,14 @@ JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
 WHERE ku.TABLE_NAME = @TableName
 ORDER BY ku.ORDINAL_POSITION
 "@
+            $pkCmd.CommandText = $pkQuery
             $pkCmd.Parameters.AddWithValue("@TableName", $tableName) | Out-Null
+            
+            if ($ShowSQL) {
+                Write-Host "[DEBUG] Executing primary key query:" -ForegroundColor DarkCyan
+                Write-Host $pkQuery -ForegroundColor DarkGray
+                Write-Host "[DEBUG] Parameters: @TableName = '$tableName'" -ForegroundColor DarkCyan
+            }
             
             $primaryKeys = @()
             $pkReader = $pkCmd.ExecuteReader()
@@ -130,7 +147,7 @@ ORDER BY ku.ORDINAL_POSITION
         
         # Get table schema
         $schemaCmd = $connection.CreateCommand()
-        $schemaCmd.CommandText = @"
+        $schemaQuery = @"
 SELECT 
     c.COLUMN_NAME,
     c.DATA_TYPE,
@@ -151,7 +168,14 @@ LEFT JOIN (
 WHERE c.TABLE_NAME = @Table
 ORDER BY c.ORDINAL_POSITION
 "@
+        $schemaCmd.CommandText = $schemaQuery
         $schemaCmd.Parameters.AddWithValue("@Table", $tableName) | Out-Null
+        
+        if ($ShowSQL) {
+            Write-Host "[DEBUG] Executing schema query:" -ForegroundColor DarkCyan
+            Write-Host $schemaQuery -ForegroundColor DarkGray
+            Write-Host "[DEBUG] Parameters: @Table = '$tableName'" -ForegroundColor DarkCyan
+        }
         
         $columns = @()
         $primaryKeys = @()
@@ -176,10 +200,22 @@ ORDER BY c.ORDINAL_POSITION
         if ($tableConfig.exportWhere) {
             $dataCmd.CommandText = "SELECT * FROM [$tableName] WHERE $($tableConfig.exportWhere)"
             Write-Host " (filtered: $($tableConfig.exportWhere))" -ForegroundColor DarkGray -NoNewline
+            if ($ShowSQL) {
+                Write-Host "`n[DEBUG] Executing data export query:" -ForegroundColor DarkCyan
+                Write-Host $dataCmd.CommandText -ForegroundColor DarkGray
+            }
         } else {
             $dataCmd.CommandText = "SELECT * FROM [$tableName]"
+            if ($ShowSQL) {
+                Write-Host "`n[DEBUG] Executing data export query:" -ForegroundColor DarkCyan
+                Write-Host $dataCmd.CommandText -ForegroundColor DarkGray
+            }
         }
         $dataCmd.CommandTimeout = 300  # 5 minutes
+        
+        if ($ShowSQL) {
+            $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        }
         
         $reader = $dataCmd.ExecuteReader()
         $data = @()
@@ -203,8 +239,18 @@ ORDER BY c.ORDINAL_POSITION
             }
             $data += $row
             $rowCount++
+            
+            if ($ShowSQL -and ($rowCount % 100 -eq 0)) {
+                Write-Host "[DEBUG] Exported $rowCount rows..." -ForegroundColor DarkCyan
+            }
         }
         $reader.Close()
+        
+        if ($ShowSQL) {
+            $stopwatch.Stop()
+            Write-Host "[DEBUG] Query execution time: $($stopwatch.ElapsedMilliseconds)ms" -ForegroundColor DarkCyan
+            Write-Host "[DEBUG] Total rows exported: $rowCount" -ForegroundColor DarkCyan
+        }
         
         # Create export object
         $export = @{

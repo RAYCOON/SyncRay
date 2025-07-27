@@ -10,7 +10,10 @@ param(
     [string]$Tables,  # Comma-separated list of specific tables
     
     [Parameter(Mandatory=$false)]
-    [switch]$Execute  # Actually perform the sync (default is dry-run)
+    [switch]$Execute,  # Actually perform the sync (default is dry-run)
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$ShowSQL  # Show SQL statements for debugging
 )
 
 # Load validation functions
@@ -37,8 +40,15 @@ $exportPath = Join-Path $PSScriptRoot $config.exportPath
 # Build connection string
 if ($targetDb.auth -eq "sql") {
     $connectionString = "Server=$($targetDb.server);Database=$($targetDb.database);User ID=$($targetDb.user);Password=$($targetDb.password);"
+    if ($ShowSQL) {
+        $maskedPassword = "*" * ($targetDb.password.Length)
+        Write-Host "[DEBUG] Connection: Server=$($targetDb.server);Database=$($targetDb.database);User ID=$($targetDb.user);Password=$maskedPassword" -ForegroundColor DarkCyan
+    }
 } else {
     $connectionString = "Server=$($targetDb.server);Database=$($targetDb.database);Integrated Security=True;"
+    if ($ShowSQL) {
+        Write-Host "[DEBUG] Connection: Server=$($targetDb.server);Database=$($targetDb.database);Integrated Security=True" -ForegroundColor DarkCyan
+    }
 }
 
 Write-Host "`n=== SYNC IMPORT ===" -ForegroundColor Cyan
@@ -46,7 +56,7 @@ Write-Host "Target: $To ($($targetDb.server))" -ForegroundColor White
 Write-Host "Mode: $(if ($Execute) { 'EXECUTE' } else { 'DRY-RUN' })" -ForegroundColor $(if ($Execute) { 'Yellow' } else { 'Green' })
 
 # Run validation before proceeding
-$validation = Test-SyncConfiguration -Config $config -DatabaseKey $To -Mode "import"
+$validation = Test-SyncConfiguration -Config $config -DatabaseKey $To -Mode "import" -ShowSQL:$ShowSQL
 if (-not $validation.Success) {
     Write-Host "`n[ABORTED] Configuration validation failed" -ForegroundColor Red
     exit 1
@@ -135,6 +145,13 @@ try {
         $targetData = @{}
         $cmd = $connection.CreateCommand()
         $cmd.CommandText = "SELECT * FROM [$targetTable]"
+        
+        if ($ShowSQL) {
+            Write-Host "[DEBUG] Loading target data:" -ForegroundColor DarkCyan
+            Write-Host $cmd.CommandText -ForegroundColor DarkGray
+            $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        }
+        
         $reader = $cmd.ExecuteReader()
         
         $columnNames = @()
@@ -142,6 +159,7 @@ try {
             $columnNames += $reader.GetName($i)
         }
         
+        $targetRowCount = 0
         while ($reader.Read()) {
             $row = @{}
             for ($i = 0; $i -lt $reader.FieldCount; $i++) {
@@ -169,8 +187,14 @@ try {
             
             
             $targetData[$compositeKey] = $row
+            $targetRowCount++
         }
         $reader.Close()
+        
+        if ($ShowSQL) {
+            $stopwatch.Stop()
+            Write-Host "[DEBUG] Loaded $targetRowCount target rows in $($stopwatch.ElapsedMilliseconds)ms" -ForegroundColor DarkCyan
+        }
         
         # Analyze changes
         $changes = @{ inserts = @(); updates = @(); deletes = @() }
@@ -464,6 +488,11 @@ if ($Execute) {
                     
                     $insertSql = "INSERT INTO [$targetTable] ($($columns -join ', ')) VALUES ($($values -join ', '))"
                     
+                    if ($ShowSQL) {
+                        Write-Host "[DEBUG] INSERT SQL:" -ForegroundColor DarkCyan
+                        Write-Host $insertSql -ForegroundColor DarkGray
+                    }
+                    
                     $insertCmd = $connection.CreateCommand()
                     $insertCmd.Transaction = $transaction
                     $insertCmd.CommandText = $insertSql
@@ -472,6 +501,9 @@ if ($Execute) {
                     foreach ($param in $parameters) {
                         if ($null -eq $param.value) {
                             $insertCmd.Parameters.AddWithValue($param.name, [DBNull]::Value) | Out-Null
+                            if ($ShowSQL) {
+                                Write-Host "[DEBUG] Parameter $($param.name) = NULL" -ForegroundColor DarkCyan
+                            }
                         } else {
                             # Handle different data types
                             if ($param.value -is [string]) {
@@ -479,24 +511,42 @@ if ($Execute) {
                                 if ($param.value -match '^\d{4}-\d{2}-\d{2}') {
                                     $dateValue = [DateTime]::Parse($param.value)
                                     $insertCmd.Parameters.AddWithValue($param.name, $dateValue) | Out-Null
+                                    if ($ShowSQL) {
+                                        Write-Host "[DEBUG] Parameter $($param.name) = '$dateValue' (DateTime)" -ForegroundColor DarkCyan
+                                    }
                                 }
                                 # Handle Boolean strings from JSON
                                 elseif ($param.value -eq "True" -or $param.value -eq "true") {
                                     $insertCmd.Parameters.AddWithValue($param.name, $true) | Out-Null
+                                    if ($ShowSQL) {
+                                        Write-Host "[DEBUG] Parameter $($param.name) = True (Boolean)" -ForegroundColor DarkCyan
+                                    }
                                 }
                                 elseif ($param.value -eq "False" -or $param.value -eq "false") {
                                     $insertCmd.Parameters.AddWithValue($param.name, $false) | Out-Null
+                                    if ($ShowSQL) {
+                                        Write-Host "[DEBUG] Parameter $($param.name) = False (Boolean)" -ForegroundColor DarkCyan
+                                    }
                                 }
                                 else {
                                     $insertCmd.Parameters.AddWithValue($param.name, $param.value) | Out-Null
+                                    if ($ShowSQL) {
+                                        Write-Host "[DEBUG] Parameter $($param.name) = '$($param.value)' (String)" -ForegroundColor DarkCyan
+                                    }
                                 }
                             }
                             elseif ($param.value -is [bool]) {
                                 # Direct boolean value
                                 $insertCmd.Parameters.AddWithValue($param.name, $param.value) | Out-Null
+                                if ($ShowSQL) {
+                                    Write-Host "[DEBUG] Parameter $($param.name) = $($param.value) (Boolean)" -ForegroundColor DarkCyan
+                                }
                             }
                             else {
                                 $insertCmd.Parameters.AddWithValue($param.name, $param.value) | Out-Null
+                                if ($ShowSQL) {
+                                    Write-Host "[DEBUG] Parameter $($param.name) = '$($param.value)' ($($param.value.GetType().Name))" -ForegroundColor DarkCyan
+                                }
                             }
                         }
                     }
@@ -536,6 +586,11 @@ if ($Execute) {
                     
                     $updateSql = "UPDATE [$targetTable] SET $($setClauses -join ', ') WHERE $($whereClauses -join ' AND ')"
                     
+                    if ($ShowSQL) {
+                        Write-Host "[DEBUG] UPDATE SQL:" -ForegroundColor DarkCyan
+                        Write-Host $updateSql -ForegroundColor DarkGray
+                    }
+                    
                     $updateCmd = $connection.CreateCommand()
                     $updateCmd.Transaction = $transaction
                     $updateCmd.CommandText = $updateSql
@@ -544,6 +599,9 @@ if ($Execute) {
                     foreach ($param in $parameters) {
                         if ($null -eq $param.value) {
                             $updateCmd.Parameters.AddWithValue($param.name, [DBNull]::Value) | Out-Null
+                            if ($ShowSQL) {
+                                Write-Host "[DEBUG] SET Parameter $($param.name) = NULL" -ForegroundColor DarkCyan
+                            }
                         } else {
                             # Handle different data types
                             if ($param.value -is [string]) {
@@ -551,24 +609,42 @@ if ($Execute) {
                                 if ($param.value -match '^\d{4}-\d{2}-\d{2}') {
                                     $dateValue = [DateTime]::Parse($param.value)
                                     $updateCmd.Parameters.AddWithValue($param.name, $dateValue) | Out-Null
+                                    if ($ShowSQL) {
+                                        Write-Host "[DEBUG] SET Parameter $($param.name) = '$dateValue' (DateTime)" -ForegroundColor DarkCyan
+                                    }
                                 }
                                 # Handle Boolean strings from JSON
                                 elseif ($param.value -eq "True" -or $param.value -eq "true") {
                                     $updateCmd.Parameters.AddWithValue($param.name, $true) | Out-Null
+                                    if ($ShowSQL) {
+                                        Write-Host "[DEBUG] SET Parameter $($param.name) = True (Boolean)" -ForegroundColor DarkCyan
+                                    }
                                 }
                                 elseif ($param.value -eq "False" -or $param.value -eq "false") {
                                     $updateCmd.Parameters.AddWithValue($param.name, $false) | Out-Null
+                                    if ($ShowSQL) {
+                                        Write-Host "[DEBUG] SET Parameter $($param.name) = False (Boolean)" -ForegroundColor DarkCyan
+                                    }
                                 }
                                 else {
                                     $updateCmd.Parameters.AddWithValue($param.name, $param.value) | Out-Null
+                                    if ($ShowSQL) {
+                                        Write-Host "[DEBUG] SET Parameter $($param.name) = '$($param.value)' (String)" -ForegroundColor DarkCyan
+                                    }
                                 }
                             }
                             elseif ($param.value -is [bool]) {
                                 # Direct boolean value
                                 $updateCmd.Parameters.AddWithValue($param.name, $param.value) | Out-Null
+                                if ($ShowSQL) {
+                                    Write-Host "[DEBUG] SET Parameter $($param.name) = $($param.value) (Boolean)" -ForegroundColor DarkCyan
+                                }
                             }
                             else {
                                 $updateCmd.Parameters.AddWithValue($param.name, $param.value) | Out-Null
+                                if ($ShowSQL) {
+                                    Write-Host "[DEBUG] SET Parameter $($param.name) = '$($param.value)' ($($param.value.GetType().Name))" -ForegroundColor DarkCyan
+                                }
                             }
                         }
                     }
@@ -577,8 +653,14 @@ if ($Execute) {
                     foreach ($param in $whereParameters) {
                         if ($null -eq $param.value) {
                             $updateCmd.Parameters.AddWithValue($param.name, [DBNull]::Value) | Out-Null
+                            if ($ShowSQL) {
+                                Write-Host "[DEBUG] WHERE Parameter $($param.name) = NULL" -ForegroundColor DarkCyan
+                            }
                         } else {
                             $updateCmd.Parameters.AddWithValue($param.name, $param.value) | Out-Null
+                            if ($ShowSQL) {
+                                Write-Host "[DEBUG] WHERE Parameter $($param.name) = '$($param.value)'" -ForegroundColor DarkCyan
+                            }
                         }
                     }
                     
@@ -608,6 +690,11 @@ if ($Execute) {
                     
                     $deleteSql = "DELETE FROM [$targetTable] WHERE $($whereClauses -join ' AND ')"
                     
+                    if ($ShowSQL) {
+                        Write-Host "[DEBUG] DELETE SQL:" -ForegroundColor DarkCyan
+                        Write-Host $deleteSql -ForegroundColor DarkGray
+                    }
+                    
                     $deleteCmd = $connection.CreateCommand()
                     $deleteCmd.Transaction = $transaction
                     $deleteCmd.CommandText = $deleteSql
@@ -616,8 +703,14 @@ if ($Execute) {
                     foreach ($param in $parameters) {
                         if ($null -eq $param.value) {
                             $deleteCmd.Parameters.AddWithValue($param.name, [DBNull]::Value) | Out-Null
+                            if ($ShowSQL) {
+                                Write-Host "[DEBUG] Parameter $($param.name) = NULL" -ForegroundColor DarkCyan
+                            }
                         } else {
                             $deleteCmd.Parameters.AddWithValue($param.name, $param.value) | Out-Null
+                            if ($ShowSQL) {
+                                Write-Host "[DEBUG] Parameter $($param.name) = '$($param.value)'" -ForegroundColor DarkCyan
+                            }
                         }
                     }
                     
@@ -638,6 +731,9 @@ if ($Execute) {
             }
             
             # Commit transaction
+            if ($ShowSQL) {
+                Write-Host "[DEBUG] Committing transaction..." -ForegroundColor DarkCyan
+            }
             $transaction.Commit()
             Write-Host "  ✓ Transaction committed" -ForegroundColor Green
         }
