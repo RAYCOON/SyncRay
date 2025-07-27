@@ -183,6 +183,7 @@ function Test-SyncConfiguration {
         [PSCustomObject]$Config,
         [string]$DatabaseKey,
         [string]$Mode,  # "export" or "import"
+        [string[]]$TablesToValidate = @(),  # Optional: specific tables to validate
         [switch]$ShowSQL  # Show SQL statements for debugging
     )
     
@@ -238,6 +239,11 @@ function Test-SyncConfiguration {
         foreach ($syncTable in $Config.syncTables) {
             $tableName = if ($Mode -eq "export") { $syncTable.sourceTable } else { 
                 if ([string]::IsNullOrWhiteSpace($syncTable.targetTable)) { $syncTable.sourceTable } else { $syncTable.targetTable }
+            }
+            
+            # Skip validation if specific tables requested and this isn't one of them
+            if ($TablesToValidate.Count -gt 0 -and $tableName -notin $TablesToValidate) {
+                continue
             }
             
             Write-Host "`nValidating table: $tableName" -ForegroundColor Yellow
@@ -674,25 +680,63 @@ function Export-DuplicatesToCSV {
         $csvData = @()
         
         foreach ($problem in $DuplicateProblems) {
-            # Expand duplicate details into individual rows
-            foreach ($detail in $problem.Details) {
-                $row = [PSCustomObject]@{
-                    TableName = $problem.TableName
-                    MatchOnFields = $problem.MatchOnFields
-                    DuplicateGroup = $detail.DuplicateGroup
-                    DuplicateGroups = $problem.DuplicateGroups
-                    TotalDuplicates = $problem.TotalDuplicates
-                    Timestamp = $problem.Timestamp
-                }
-                
-                # Add primary key columns
-                foreach ($pk in $detail.PSObject.Properties) {
-                    if ($pk.Name -notin @('DuplicateGroup')) {
-                        $row | Add-Member -NotePropertyName $pk.Name -NotePropertyValue $pk.Value
+            # First, collect all unique column names from the details to ensure consistent structure
+            $allColumns = @()
+            $standardColumns = @('TableName', 'DuplicateGroup', 'MatchOnFields')
+            
+            # Get all unique column names from details (these are the actual data columns)
+            if ($problem.Details -and $problem.Details.Count -gt 0) {
+                $firstDetail = $problem.Details[0]
+                foreach ($prop in $firstDetail.PSObject.Properties) {
+                    if ($prop.Name -ne 'DuplicateGroup') {
+                        $allColumns += $prop.Name
                     }
                 }
+            }
+            
+            # Get primary key columns from the problem metadata
+            $primaryKeyColumns = @()
+            if ($problem.PrimaryKeys -and $problem.PrimaryKeys.Count -gt 0) {
+                $primaryKeyColumns = $problem.PrimaryKeys
+            } else {
+                # Fallback: try to detect primary key columns by name pattern
+                foreach ($colName in $allColumns) {
+                    if ($colName -match '_RSN$|_ID$|ID$|_Key$|Key$') {
+                        $primaryKeyColumns += $colName
+                    }
+                }
+            }
+            
+            # Reorder columns: primary keys first, then other columns, DuplicateGroup last
+            $orderedColumns = @()
+            # Add primary keys that exist in our data
+            foreach ($pk in $primaryKeyColumns) {
+                if ($pk -in $allColumns) {
+                    $orderedColumns += $pk
+                }
+            }
+            # Add remaining columns (excluding those already added)
+            $orderedColumns += $allColumns | Where-Object { $_ -notin $orderedColumns }
+            
+            # Expand duplicate details into individual rows
+            foreach ($detail in $problem.Details) {
+                # Create ordered hashtable with data columns
+                $orderedRow = [ordered]@{}
                 
-                $csvData += $row
+                # Add data columns in the reordered sequence
+                foreach ($colName in $orderedColumns) {
+                    $value = $null
+                    if ($detail.PSObject.Properties.Name -contains $colName) {
+                        $value = $detail.$colName
+                    }
+                    $orderedRow[$colName] = $value
+                }
+                
+                # Add DuplicateGroup at the end
+                $orderedRow['DuplicateGroup'] = $detail.DuplicateGroup
+                
+                # Convert to PSCustomObject to maintain order
+                $csvData += [PSCustomObject]$orderedRow
             }
         }
         
@@ -732,14 +776,14 @@ function Export-SkippedTablesToCSV {
             New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
         }
         
-        # Convert to CSV-friendly format
+        # Convert to CSV-friendly format with ordered columns
         $csvData = $SkippedTables | ForEach-Object {
-            [PSCustomObject]@{
+            [PSCustomObject][ordered]@{
+                Timestamp = $_.Timestamp
                 TableName = $_.TableName
                 Reason = $_.Reason
-                DuplicateGroups = $_.DuplicateGroups
-                TotalDuplicates = $_.TotalDuplicates
-                Timestamp = $_.Timestamp
+                DuplicateGroups = if ($null -ne $_.DuplicateGroups) { $_.DuplicateGroups } else { 0 }
+                TotalDuplicates = if ($null -ne $_.TotalDuplicates) { $_.TotalDuplicates } else { 0 }
             }
         }
         

@@ -17,20 +17,18 @@ param(
     
     # Action modifiers
     [Parameter(Mandatory=$false)]
-    [switch]$Analyze,  # Analyze data quality only
+    [switch]$Execute,  # Execute mode - apply changes (default is preview/dry-run)
+    
+    # Output options
+    [Parameter(Mandatory=$false)]
+    [switch]$CreateReport,  # Create context-aware reports/documentation
     
     [Parameter(Mandatory=$false)]
-    [switch]$Validate,  # Validate configuration only
+    [switch]$Quiet,  # Minimal output
     
-    [Parameter(Mandatory=$false)]
-    [switch]$Execute,  # Execute import/sync (default is dry-run)
-    
-    # Export options
+    # Export-specific options
     [Parameter(Mandatory=$false)]
     [switch]$SkipOnDuplicates,  # Skip tables with duplicates
-    
-    [Parameter(Mandatory=$false)]
-    [switch]$CreateReports,  # Create CSV problem reports
     
     [Parameter(Mandatory=$false)]
     [string]$ReportPath,  # Path for CSV reports
@@ -50,11 +48,282 @@ param(
     [switch]$HelpFrom,  # Show export help
     
     [Parameter(Mandatory=$false)]
-    [switch]$HelpTo  # Show import help
+    [switch]$HelpTo,  # Show import help
+    
+    # Interactive mode
+    [Parameter(Mandatory=$false)]
+    [switch]$Interactive  # Start interactive mode
 )
 
-# Show help if requested or no parameters
-if ($Help -or $HelpFrom -or $HelpTo -or (-not $From -and -not $To -and -not $Analyze -and -not $Validate)) {
+# Start interactive mode if requested or no parameters
+if ($Interactive -or (-not $From -and -not $To -and -not $Help -and -not $HelpFrom -and -not $HelpTo -and $PSBoundParameters.Count -eq 0)) {
+    Write-Host "`n=== SYNCRAY INTERACTIVE MODE ===" -ForegroundColor Cyan
+    Write-Host "Welcome to SyncRay - Database Synchronization Tool" -ForegroundColor White
+    Write-Host ""
+    
+    # Load configuration to show available databases
+    $configPath = Join-Path $PSScriptRoot $ConfigFile
+    if (-not (Test-Path $configPath)) {
+        Write-Host "[ERROR] Config file not found: $configPath" -ForegroundColor Red
+        Write-Host "Please create a sync-config.json file first." -ForegroundColor Yellow
+        exit 1
+    }
+    
+    $config = Get-Content $configPath -Raw | ConvertFrom-Json
+    $availableDatabases = @($config.databases.PSObject.Properties.Name)
+    
+    # Step 1: Choose operation mode
+    Write-Host "What would you like to do?" -ForegroundColor Yellow
+    Write-Host "1) Export data from a database" -ForegroundColor White
+    Write-Host "2) Import data to a database" -ForegroundColor White
+    Write-Host "3) Sync data between databases" -ForegroundColor White
+    Write-Host "4) Show help" -ForegroundColor White
+    Write-Host "5) Exit" -ForegroundColor White
+    Write-Host ""
+    
+    do {
+        $choice = Read-Host "Select an option (1-6)"
+    } while ($choice -notmatch '^[1-6]$')
+    
+    # Handle exit or help immediately
+    if ($choice -eq '6') {
+        Write-Host "`nExiting SyncRay. Goodbye!" -ForegroundColor Cyan
+        exit 0
+    }
+    
+    if ($choice -eq '5') {
+        # Show help and restart
+        & $PSCommandPath -Help
+        exit 0
+    }
+    
+    # Variables to build the command
+    $selectedFrom = $null
+    $selectedTo = $null
+    $selectedAction = "preview"  # default
+    $selectedTables = $null
+    $createReports = $false
+    
+    # Step 2: Based on choice, get database selection
+    switch ($choice) {
+        '1' {  # Export
+            Write-Host "`nAvailable databases:" -ForegroundColor Yellow
+            for ($i = 0; $i -lt $availableDatabases.Count; $i++) {
+                Write-Host "$($i + 1)) $($availableDatabases[$i])" -ForegroundColor White
+            }
+            Write-Host ""
+            
+            do {
+                $dbChoice = Read-Host "Select source database (1-$($availableDatabases.Count))"
+            } while ($dbChoice -notmatch "^[1-$($availableDatabases.Count)]$")
+            
+            $selectedFrom = $availableDatabases[[int]$dbChoice - 1]
+            Write-Host "Selected: $selectedFrom" -ForegroundColor Green
+        }
+        
+        '2' {  # Import
+            Write-Host "`nAvailable databases:" -ForegroundColor Yellow
+            for ($i = 0; $i -lt $availableDatabases.Count; $i++) {
+                Write-Host "$($i + 1)) $($availableDatabases[$i])" -ForegroundColor White
+            }
+            Write-Host ""
+            
+            do {
+                $dbChoice = Read-Host "Select target database (1-$($availableDatabases.Count))"
+            } while ($dbChoice -notmatch "^[1-$($availableDatabases.Count)]$")
+            
+            $selectedTo = $availableDatabases[[int]$dbChoice - 1]
+            Write-Host "Selected: $selectedTo" -ForegroundColor Green
+        }
+        
+        '3' {  # Sync
+            Write-Host "`nSelect SOURCE database:" -ForegroundColor Yellow
+            for ($i = 0; $i -lt $availableDatabases.Count; $i++) {
+                Write-Host "$($i + 1)) $($availableDatabases[$i])" -ForegroundColor White
+            }
+            Write-Host ""
+            
+            do {
+                $dbChoice = Read-Host "Select source database (1-$($availableDatabases.Count))"
+            } while ($dbChoice -notmatch "^[1-$($availableDatabases.Count)]$")
+            
+            $selectedFrom = $availableDatabases[[int]$dbChoice - 1]
+            Write-Host "Source: $selectedFrom" -ForegroundColor Green
+            
+            Write-Host "`nSelect TARGET database:" -ForegroundColor Yellow
+            for ($i = 0; $i -lt $availableDatabases.Count; $i++) {
+                if ($availableDatabases[$i] -ne $selectedFrom) {
+                    Write-Host "$($i + 1)) $($availableDatabases[$i])" -ForegroundColor White
+                }
+            }
+            Write-Host ""
+            
+            do {
+                $dbChoice = Read-Host "Select target database (1-$($availableDatabases.Count))"
+            } while ($dbChoice -notmatch "^[1-$($availableDatabases.Count)]$" -or $availableDatabases[[int]$dbChoice - 1] -eq $selectedFrom)
+            
+            $selectedTo = $availableDatabases[[int]$dbChoice - 1]
+            Write-Host "Target: $selectedTo" -ForegroundColor Green
+        }
+        
+        '4' {  # Analyze
+            Write-Host "`nWhat would you like to analyze?" -ForegroundColor Yellow
+            Write-Host "1) Source database (export analysis)" -ForegroundColor White
+            Write-Host "2) Target database (import readiness)" -ForegroundColor White
+            Write-Host ""
+            
+            do {
+                $analyzeChoice = Read-Host "Select option (1-2)"
+            } while ($analyzeChoice -notmatch '^[1-2]$')
+            
+            Write-Host "`nAvailable databases:" -ForegroundColor Yellow
+            for ($i = 0; $i -lt $availableDatabases.Count; $i++) {
+                Write-Host "$($i + 1)) $($availableDatabases[$i])" -ForegroundColor White
+            }
+            Write-Host ""
+            
+            do {
+                $dbChoice = Read-Host "Select database (1-$($availableDatabases.Count))"
+            } while ($dbChoice -notmatch "^[1-$($availableDatabases.Count)]$")
+            
+            if ($analyzeChoice -eq '1') {
+                $selectedFrom = $availableDatabases[[int]$dbChoice - 1]
+                Write-Host "Analyzing source: $selectedFrom" -ForegroundColor Green
+            } else {
+                $selectedTo = $availableDatabases[[int]$dbChoice - 1]
+                Write-Host "Analyzing target: $selectedTo" -ForegroundColor Green
+            }
+            
+            $selectedAction = "analyze"
+        }
+    }
+    
+    # Step 3: Table selection (if not analyze mode)
+    if ($choice -ne '4') {
+        Write-Host "`nTable selection:" -ForegroundColor Yellow
+        Write-Host "1) All configured tables" -ForegroundColor White
+        Write-Host "2) Specific tables" -ForegroundColor White
+        Write-Host ""
+        
+        do {
+            $tableChoice = Read-Host "Select option (1-2)"
+        } while ($tableChoice -notmatch '^[1-2]$')
+        
+        if ($tableChoice -eq '2') {
+            # Get unique table names from configuration
+            $configuredTables = @()
+            if ($choice -eq '1' -or $choice -eq '3') {
+                # For export or sync, show source tables
+                $configuredTables = $config.syncTables | ForEach-Object { $_.sourceTable } | Sort-Object -Unique
+            } else {
+                # For import, show target tables
+                $configuredTables = $config.syncTables | ForEach-Object { 
+                    if ($_.targetTable) { $_.targetTable } else { $_.sourceTable }
+                } | Sort-Object -Unique
+            }
+            
+            Write-Host "`nConfigured tables:" -ForegroundColor Yellow
+            for ($i = 0; $i -lt $configuredTables.Count; $i++) {
+                Write-Host "$($i + 1)) $($configuredTables[$i])" -ForegroundColor White
+            }
+            Write-Host ""
+            Write-Host "Enter table numbers (comma-separated, e.g., 1,3,5) or table names:" -ForegroundColor Yellow
+            Write-Host "Examples: '1,2,3' or 'Users,Orders' or 'ALL' for all tables" -ForegroundColor Gray
+            
+            $tableInput = Read-Host "Tables"
+            
+            if ($tableInput -eq 'ALL' -or $tableInput -eq 'all') {
+                # User wants all tables
+                Write-Host "Selected: All tables" -ForegroundColor Green
+            } else {
+                # Check if input is numbers or names
+                if ($tableInput -match '^[\d,\s]+$') {
+                    # Numbers provided
+                    $selectedIndices = $tableInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' }
+                    $selectedTableNames = @()
+                    foreach ($index in $selectedIndices) {
+                        $idx = [int]$index - 1
+                        if ($idx -ge 0 -and $idx -lt $configuredTables.Count) {
+                            $selectedTableNames += $configuredTables[$idx]
+                        }
+                    }
+                    $selectedTables = $selectedTableNames -join ','
+                } else {
+                    # Table names provided directly
+                    $selectedTables = $tableInput
+                }
+                Write-Host "Selected tables: $selectedTables" -ForegroundColor Green
+            }
+        }
+    }
+    
+    # Step 4: Action mode
+    if ($choice -ne '4') {
+        Write-Host "`nAction mode:" -ForegroundColor Yellow
+        Write-Host "1) Preview (dry-run) - Show what would happen with full analysis" -ForegroundColor White
+        Write-Host "2) Execute - Actually perform the operation" -ForegroundColor White
+        Write-Host ""
+        
+        do {
+            $actionChoice = Read-Host "Select action (1-2)"
+        } while ($actionChoice -notmatch "^[1-2]$")
+        
+        switch ($actionChoice) {
+            '1' { $selectedAction = "preview" }
+            '2' { $selectedAction = "execute" }
+        }
+        
+        Write-Host "Mode: $($selectedAction.ToUpper())" -ForegroundColor Green
+    }
+    
+    # Step 5: Reports
+    Write-Host "`nGenerate reports?" -ForegroundColor Yellow
+    Write-Host "1) No - Console output only" -ForegroundColor White
+    Write-Host "2) Yes - Create CSV/JSON reports" -ForegroundColor White
+    Write-Host ""
+    
+    do {
+        $reportChoice = Read-Host "Select option (1-2)"
+    } while ($reportChoice -notmatch '^[1-2]$')
+    
+    if ($reportChoice -eq '2') {
+        $createReports = $true
+        Write-Host "Reports: Enabled" -ForegroundColor Green
+    }
+    
+    # Step 6: Confirm and execute
+    Write-Host "`n=== SUMMARY ===" -ForegroundColor Cyan
+    if ($selectedFrom) { Write-Host "From: $selectedFrom" -ForegroundColor White }
+    if ($selectedTo) { Write-Host "To: $selectedTo" -ForegroundColor White }
+    if ($selectedTables) { Write-Host "Tables: $selectedTables" -ForegroundColor White }
+    Write-Host "Action: $($selectedAction.ToUpper())" -ForegroundColor $(if ($selectedAction -eq "execute") { "Yellow" } else { "White" })
+    if ($createReports) { Write-Host "Reports: Enabled" -ForegroundColor White }
+    Write-Host ""
+    
+    $confirm = Read-Host "Execute this operation? (y/n)"
+    if ($confirm -ne 'y' -and $confirm -ne 'Y') {
+        Write-Host "`nOperation cancelled." -ForegroundColor Yellow
+        exit 0
+    }
+    
+    # Build and execute the command
+    Write-Host "`nExecuting..." -ForegroundColor Cyan
+    $params = @{}
+    if ($selectedFrom) { $params['From'] = $selectedFrom }
+    if ($selectedTo) { $params['To'] = $selectedTo }
+    if ($selectedTables) { $params['Tables'] = $selectedTables }
+    if ($selectedAction -eq 'analyze') { $params['Analyze'] = $true }
+    if ($selectedAction -eq 'execute') { $params['Execute'] = $true }
+    if ($createReports) { $params['CreateReport'] = $true }
+    if ($ConfigFile) { $params['ConfigFile'] = $ConfigFile }
+    
+    # Re-invoke the script with the selected parameters
+    & $PSCommandPath @params
+    exit $LASTEXITCODE
+}
+
+# Show help if requested
+if ($Help -or $HelpFrom -or $HelpTo) {
     # Check for context-sensitive help
     if (($Help -or $HelpFrom -or $HelpTo) -and ($HelpFrom -or $HelpTo -or $From -or $To)) {
         if (($HelpFrom -and $HelpTo) -or ($From -and $To)) {
@@ -112,9 +381,8 @@ SYNTAX:
 
 AVAILABLE PARAMETERS:
     -From <string>      Source database key (required)
-    -Analyze            Analyze data quality without exporting
-    -Validate           Quick validation without export or reports
-    -CreateReports      Create CSV reports for data quality issues
+    -Execute            Execute export (default: preview with analysis)
+    -CreateReports      Create CSV, JSON and Markdown reports
     -SkipOnDuplicates   Automatically skip tables with duplicate records
     -ReportPath <path>  Custom path for CSV reports
     -CsvDelimiter <char> CSV delimiter (default: culture-specific)
@@ -126,11 +394,11 @@ EXAMPLES:
     # Standard export
     syncray.ps1 -From production
     
-    # Analyze duplicates and create reports
-    syncray.ps1 -From production -Analyze -CreateReports
+    # Preview with reports (duplicates, data quality)
+    syncray.ps1 -From production -CreateReports
     
-    # Export specific tables with validation
-    syncray.ps1 -From production -Tables "Users,Orders" -Validate
+    # Export specific tables
+    syncray.ps1 -From production -Tables "Users,Orders"
     
     # Skip duplicates automatically
     syncray.ps1 -From production -SkipOnDuplicates
@@ -150,14 +418,19 @@ SYNTAX:
 
 AVAILABLE PARAMETERS:
     -To <string>        Target database key (required)
-    -Execute            Apply changes (default is dry-run preview)
+    -Execute            Apply changes (default: preview with analysis)
+    -CreateReports      Create detailed reports (CSV, JSON, Markdown)
+    -ReportPath <path>  Custom path for reports
     -ConfigFile <path>  Configuration file (default: sync-config.json)
     -Tables <list>      Comma-separated list of specific tables
     -ShowSQL            Show SQL statements for debugging
 
 EXAMPLES:
-    # Preview import (dry-run)
+    # Preview import (analyze compatibility, show changes)
     syncray.ps1 -To development
+    
+    # Preview with detailed reports
+    syncray.ps1 -To development -CreateReports
     
     # Execute import
     syncray.ps1 -To development -Execute
@@ -201,63 +474,71 @@ OPERATION MODES:
        Direct synchronization from source to target
        Example: syncray.ps1 -From production -To development
 
+ACTION MODES:
+    Default (Preview)   Show what would happen without making changes (includes full analysis)
+    -Execute           Actually perform the operation
+
 DATABASE PARAMETERS:
     -From <string>      Source database key from configuration
     -To <string>        Target database key from configuration
 
+ACTION PARAMETERS:
+    -Execute            Execute mode - apply changes (default: preview with full analysis)
+
+OUTPUT PARAMETERS:
+    -CreateReport       Create context-aware reports/documentation
+    -Quiet              Minimal output
+    -ShowSQL            Show SQL statements for debugging
+
 EXPORT PARAMETERS (use with -From):
-    -Analyze            Analyze data quality without exporting
-    -Validate           Quick validation without export or reports
-    -CreateReports      Create CSV reports for data quality issues
     -SkipOnDuplicates   Automatically skip tables with duplicate records
-    -ReportPath <path>  Custom path for CSV reports
+    -ReportPath <path>  Custom path for reports
     -CsvDelimiter <char> CSV delimiter (default: culture-specific)
 
-IMPORT PARAMETERS (use with -To):
-    -Execute            Apply changes (default is dry-run preview)
-
-COMMON PARAMETERS (use with any mode):
+COMMON PARAMETERS:
     -ConfigFile <path>  Configuration file (default: sync-config.json)
     -Tables <list>      Comma-separated list of specific tables
-    -ShowSQL            Show SQL statements for debugging
     -Help               Show this help message
     -HelpFrom           Show export mode help
     -HelpTo             Show import mode help
+    -Interactive        Start interactive mode
 
 PARAMETER COMPATIBILITY:
-    Export Mode (-From only):
-        ✓ All export parameters
-        ✓ Common parameters
-        ✗ -Execute (import only)
+    Preview Mode (default):
+        ✓ All parameters except -Execute
+        Shows what would happen without changes
 
-    Import Mode (-To only):
-        ✓ -Execute
-        ✓ Common parameters
-        ✗ Export parameters (-Analyze, -Validate, -CreateReports, etc.)
-
-    Sync Mode (-From + -To):
-        ✓ -Execute
-        ✓ Export parameters (applied to export phase)
-        ✓ Common parameters
+    Execute Mode (-Execute):
+        ✓ Works with all operation modes
+        ✓ -CreateReport generates operation documentation
 
 EXAMPLES:
-    # Export from production
+    # Preview what would be exported
     syncray.ps1 -From production
     
-    # Export with duplicate analysis and reports
-    syncray.ps1 -From production -Analyze -CreateReports
+    # Analyze source data quality (full analysis)
+    syncray.ps1 -From production
     
-    # Preview import to development (dry-run)
+    # Preview with detailed reports
+    syncray.ps1 -From production -CreateReport
+    
+    # Execute export with documentation
+    syncray.ps1 -From production -Execute -CreateReport
+    
+    # Preview import changes
     syncray.ps1 -To development
     
-    # Execute import to development
+    # Preview target database (check compatibility)
+    syncray.ps1 -To development
+    
+    # Execute import
     syncray.ps1 -To development -Execute
     
-    # Direct sync with automatic duplicate skipping
-    syncray.ps1 -From production -To development -SkipOnDuplicates -Execute
+    # Full sync with documentation
+    syncray.ps1 -From production -To development -Execute -CreateReport
     
-    # Export specific tables with SQL debugging
-    syncray.ps1 -From production -Tables "Users,Orders" -ShowSQL
+    # Interactive mode
+    syncray.ps1 -Interactive
     
     # Get context-specific help
     syncray.ps1 -HelpFrom        # Export mode help
@@ -266,9 +547,32 @@ EXAMPLES:
 
 SAFETY FEATURES:
     - Comprehensive validation before operations
-    - Dry-run by default (use -Execute to apply)
+    - Preview by default (use -Execute to apply changes)
     - Transaction rollback on errors
-    - Duplicate detection and handling
+    - Duplicate detection with detailed reporting
+
+CONSOLE OUTPUT:
+    Preview Mode:
+    - Full duplicate analysis with example records
+    - Data quality issues and validation errors
+    - Summary statistics and recommendations
+    
+    Execute Mode:
+    - Operation timing and duration
+    - Per-table results (rows/operations/size)
+    - Success/failure status with details
+    - Complete execution summary
+
+REPORT FILES (with -CreateReport):
+    ./reports/[timestamp]/
+    ├── analysis_report.md       # Preview: Analysis summary
+    ├── export_report.md         # Execute: Export results
+    ├── execution_report.md      # Execute: Import results
+    ├── preview_report.md        # Preview: Planned changes
+    ├── duplicates/              # Detailed duplicate records
+    │   └── [Table]_duplicates.csv
+    ├── *_summary.csv            # Operation summaries
+    └── *_log.json               # Detailed operation data
 
 "@ -ForegroundColor Cyan
     exit 0
@@ -287,15 +591,14 @@ if ($From -and $To) {
     exit 1
 }
 
-# Validate parameter combinations based on mode
+# Validate action parameter combinations
+# (Execute is now the only action parameter)
+
+# Validate mode-specific parameter combinations
 if ($mode -eq "import") {
     # Check for export-only parameters used with import
     $invalidParams = @()
-    if ($Analyze) { $invalidParams += "-Analyze" }
-    if ($Validate) { $invalidParams += "-Validate" }
-    if ($CreateReports) { $invalidParams += "-CreateReports" }
     if ($SkipOnDuplicates) { $invalidParams += "-SkipOnDuplicates" }
-    if ($ReportPath) { $invalidParams += "-ReportPath" }
     if ($CsvDelimiter) { $invalidParams += "-CsvDelimiter" }
     
     if ($invalidParams.Count -gt 0) {
@@ -303,17 +606,14 @@ if ($mode -eq "import") {
         Write-Host "        $($invalidParams -join ', ')" -ForegroundColor Red
         Write-Host "" -ForegroundColor Red
         Write-Host "These parameters are only available for export operations." -ForegroundColor Yellow
-        Write-Host "To analyze or validate data, use: syncray.ps1 -From $To -Analyze" -ForegroundColor Cyan
         exit 1
     }
 }
 
-if ($mode -eq "export" -and $Execute) {
-    Write-Host "[ERROR] -Execute cannot be used with -From only (export mode)" -ForegroundColor Red
-    Write-Host "       -Execute is only valid for import (-To) or sync (-From + -To) operations" -ForegroundColor Yellow
-    Write-Host "" -ForegroundColor Yellow
-    Write-Host "For export, data is always written to JSON files. Use -To to import and execute changes." -ForegroundColor Cyan
-    exit 1
+# Determine action mode
+$actionMode = "preview"  # Default
+if ($Execute) {
+    $actionMode = "execute"
 }
 
 # Get script directory
@@ -322,11 +622,11 @@ $scriptDir = $PSScriptRoot
 # Show operation header
 Write-Host "`n=== SYNCRAY OPERATION ===" -ForegroundColor Cyan
 Write-Host "Mode: $($mode.ToUpper())" -ForegroundColor White
+Write-Host "Action: $($actionMode.ToUpper())" -ForegroundColor $(if ($actionMode -eq "execute") { "Yellow" } else { "White" })
 if ($From) { Write-Host "From: $From" -ForegroundColor White }
 if ($To) { Write-Host "To: $To" -ForegroundColor White }
 if ($Tables) { Write-Host "Tables: $Tables" -ForegroundColor White }
-if ($Analyze) { Write-Host "Action: Analyze" -ForegroundColor Yellow }
-if ($Validate) { Write-Host "Action: Validate" -ForegroundColor Yellow }
+if ($CreateReport) { Write-Host "Reports: Enabled" -ForegroundColor Green }
 Write-Host ""
 
 # Build parameter hashtables for sub-scripts
@@ -349,16 +649,17 @@ if ($ShowSQL) {
 
 # Export-specific parameters
 if ($From) { $exportParams['From'] = $From }
-if ($Analyze) { $exportParams['Analyze'] = $true }
-if ($Validate) { $exportParams['Validate'] = $true }
+if ($actionMode -eq "preview" -and $mode -eq "export") { $exportParams['Preview'] = $true }
 if ($SkipOnDuplicates) { $exportParams['SkipOnDuplicates'] = $true }
-if ($CreateReports) { $exportParams['CreateReports'] = $true }
+if ($CreateReport) { $exportParams['CreateReports'] = $true }
 if ($ReportPath) { $exportParams['ReportPath'] = $ReportPath }
 if ($CsvDelimiter) { $exportParams['CsvDelimiter'] = $CsvDelimiter }
 
 # Import-specific parameters
 if ($To) { $importParams['To'] = $To }
-if ($Execute) { $importParams['Execute'] = $true }
+if ($Execute -and $mode -ne "export") { $importParams['Execute'] = $true }
+if ($CreateReport) { $importParams['CreateReports'] = $true }
+if ($ReportPath) { $importParams['ReportPath'] = $ReportPath }
 
 # Execute based on mode
 switch ($mode) {
@@ -383,6 +684,11 @@ switch ($mode) {
     }
     
     "sync" {
+        # In preview mode for sync, we need to pass preview to export but not import
+        if ($actionMode -eq "preview") {
+            $exportParams['Preview'] = $true
+        }
+        
         # First export
         Write-Host "=== STEP 1: EXPORT ===" -ForegroundColor Cyan
         & "$scriptDir\sync-export.ps1" @exportParams

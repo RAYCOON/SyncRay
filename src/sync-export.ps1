@@ -1,10 +1,8 @@
 # sync-export.ps1 - Export all configured tables from source database
-[CmdletBinding(DefaultParameterSetName='Export')]
+[CmdletBinding()]
 param(
     # Core parameters
-    [Parameter(Mandatory=$true, ParameterSetName='Export')]
-    [Parameter(Mandatory=$true, ParameterSetName='Analyze')]
-    [Parameter(Mandatory=$true, ParameterSetName='Validate')]
+    [Parameter(Mandatory=$true)]
     [string]$From,
     
     [Parameter(Mandatory=$false)]
@@ -14,11 +12,8 @@ param(
     [string]$Tables,  # Comma-separated list of specific tables
     
     # Actions (default: Export if none specified)
-    [Parameter(Mandatory=$false, ParameterSetName='Analyze')]
-    [switch]$Analyze,  # Only analyze and create reports, don't export data
-    
-    [Parameter(Mandatory=$false, ParameterSetName='Validate')]
-    [switch]$Validate,  # Only validate without reports or export
+    [Parameter(Mandatory=$false)]
+    [switch]$Preview,  # Preview mode - show what would be exported without prompts
     
     # Export options
     [Parameter(Mandatory=$false)]
@@ -37,7 +32,7 @@ param(
     [Parameter(Mandatory=$false)]
     [switch]$ShowSQL,  # Show SQL statements for debugging
     
-    [Parameter(Mandatory=$false, ParameterSetName='Help')]
+    [Parameter(Mandatory=$false)]
     [switch]$Help  # Show help information
 )
 
@@ -64,13 +59,6 @@ PARAMETERS:
         Comma-separated list of specific tables to process
         Example: -Tables "Users,Orders,Products"
         
-    -Analyze
-        Analyze data quality and create reports WITHOUT exporting data
-        Automatically creates CSV reports in analysis/ directory
-        
-    -Validate
-        Validate configuration and data WITHOUT exporting or reports
-        Quick check for configuration issues
         
     -SkipOnDuplicates
         Automatically skip tables with duplicate records
@@ -96,15 +84,16 @@ PARAMETERS:
         Show this help message
 
 MODES OF OPERATION:
-    1. Export Mode (default)
-       Exports data from source database to JSON files
+    1. Preview Mode (default)
+       - Full data quality analysis
+       - Duplicate detection with detailed records
+       - Shows what would be exported
+       - Optional reports with -CreateReports
        
-    2. Analyze Mode (-Analyze)
-       Analyzes data quality without exporting
-       Always creates CSV reports
-       
-    3. Validate Mode (-Validate)
-       Quick validation without export or reports
+    2. Export Mode (with -Execute from syncray.ps1)
+       - Exports data to JSON files
+       - Detailed execution report
+       - Optional reports with -CreateReports
 
 EXAMPLES:
     # Standard export
@@ -113,8 +102,8 @@ EXAMPLES:
     # Export with problem reports
     sync-export.ps1 -From production -CreateReports
     
-    # Analyze data quality
-    sync-export.ps1 -From production -Analyze
+    # Preview data quality (use syncray.ps1)
+    syncray.ps1 -From production
     
     # Export specific tables with SQL debug output
     sync-export.ps1 -From production -Tables "Users,Orders" -ShowSQL
@@ -122,31 +111,24 @@ EXAMPLES:
     # Export with custom CSV delimiter
     sync-export.ps1 -From production -CreateReports -CsvDelimiter ";"
     
-    # Quick validation
-    sync-export.ps1 -From production -Validate
+    # Preview with CSV reports
+    sync-export.ps1 -From production -Preview -CreateReports
 
 REPORT STRUCTURE:
-    reports/ or analysis/
-    └── yyyyMMdd_HHmmss/
-        ├── duplicates/
-        │   ├── Table1_duplicates.csv
-        │   └── Table2_duplicates.csv
-        └── skipped_tables.csv
+    reports/yyyyMMdd_HHmmss/
+    ├── analysis_report.md      # Analysis summary with recommendations
+    ├── export_report.md        # Export execution results
+    ├── duplicates/
+    │   └── [Table]_duplicates.csv
+    ├── skipped_tables.csv
+    ├── export_summary.csv      # Table-by-table results
+    └── export_log.json         # Detailed operation data
 
 "@ -ForegroundColor Cyan
     exit 0
 }
 
-# Validate parameter combinations
-if ($Analyze -and $Validate) {
-    Write-Host "[ERROR] Cannot use -Analyze and -Validate together" -ForegroundColor Red
-    exit 1
-}
-
-if ($Validate -and $CreateReports) {
-    Write-Host "[WARNING] -CreateReports ignored with -Validate" -ForegroundColor Yellow
-    $CreateReports = $false
-}
+# No parameter validation needed anymore - simplified structure
 
 # Load validation functions
 . (Join-Path $PSScriptRoot "sync-validation.ps1")
@@ -184,16 +166,13 @@ if (-not (Test-Path $exportPath)) {
 $duplicateProblems = @()
 $skippedTables = @()
 $exportStartTime = Get-Date
+$exportedTablesInfo = @()  # Track info for execution report
 
-# Set report path based on mode
-if ($Analyze -or $CreateReports) {
+# Set report path if reports are requested
+if ($CreateReports) {
     if (-not $ReportPath) {
         $timestamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
-        if ($Analyze) {
-            $ReportPath = Join-Path (Split-Path $exportPath) "analysis/$timestamp"
-        } else {
-            $ReportPath = Join-Path (Split-Path $exportPath) "reports/$timestamp"
-        }
+        $ReportPath = Join-Path (Split-Path $exportPath) "reports/$timestamp"
     }
 }
 
@@ -211,25 +190,19 @@ if ($sourceDb.auth -eq "sql") {
     }
 }
 
-if ($Analyze) {
-    Write-Host "`n=== ANALYZE MODE ===" -ForegroundColor Yellow
-    Write-Host "This will analyze data quality and create reports WITHOUT exporting any data" -ForegroundColor Yellow
-} elseif ($Validate) {
-    Write-Host "`n=== VALIDATE MODE ===" -ForegroundColor Yellow
-    Write-Host "This will validate configuration and data quality WITHOUT exporting" -ForegroundColor Yellow
+if ($Preview) {
+    Write-Host "`n=== EXPORT PREVIEW ===" -ForegroundColor Cyan
+    Write-Host "Analyzing data quality without exporting" -ForegroundColor Yellow
+    if ($CreateReports) {
+        Write-Host "CSV reports will be created" -ForegroundColor Yellow
+    } else {
+        Write-Host "Console output only (use -CreateReports for CSV)" -ForegroundColor Gray
+    }
 } else {
     Write-Host "`n=== SYNC EXPORT ===" -ForegroundColor Cyan
 }
 Write-Host "Source: $From ($($sourceDb.server))" -ForegroundColor White
 Write-Host "Tables: $(if ($Tables) { $Tables } else { 'All configured' })" -ForegroundColor White
-
-# Run validation before proceeding
-$validation = Test-SyncConfiguration -Config $config -DatabaseKey $From -Mode "export" -ShowSQL:$ShowSQL
-if (-not $validation.Success) {
-    Write-Host "`n[ABORTED] Configuration validation failed" -ForegroundColor Red
-    exit 1
-}
-Write-Host ""
 
 # Determine which tables to export
 if ($Tables) {
@@ -238,6 +211,14 @@ if ($Tables) {
     # Get unique source tables
     $tablesToExport = $config.syncTables | ForEach-Object { $_.sourceTable } | Sort-Object -Unique
 }
+
+# Run validation before proceeding (only for tables we're going to export)
+$validation = Test-SyncConfiguration -Config $config -DatabaseKey $From -Mode "export" -TablesToValidate $tablesToExport -ShowSQL:$ShowSQL
+if (-not $validation.Success) {
+    Write-Host "`n[ABORTED] Configuration validation failed" -ForegroundColor Red
+    exit 1
+}
+Write-Host ""
 
 $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
 $exportedCount = 0
@@ -345,16 +326,15 @@ ORDER BY ku.ORDINAL_POSITION
             Write-Host " [DUPLICATES FOUND]" -ForegroundColor Red
             Write-Host "    Found $($uniquenessTest.TotalDuplicates) duplicate records in $($uniquenessTest.DuplicateGroups) groups" -ForegroundColor Yellow
             
-            # Track duplicate problem for CSV export
-            if (($Analyze -or $CreateReports) -and $uniquenessTest.DuplicateDetails) {
-                $duplicateProblems += @{
-                    TableName = $tableName
-                    MatchOnFields = ($tableConfig.matchOn -join ",")
-                    DuplicateGroups = $uniquenessTest.DuplicateGroups
-                    TotalDuplicates = $uniquenessTest.TotalDuplicates
-                    Details = $uniquenessTest.DuplicateDetails
-                    Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-                }
+            # Always track duplicate problems for summary
+            $duplicateProblems += @{
+                TableName = $tableName
+                MatchOnFields = ($tableConfig.matchOn -join ",")
+                DuplicateGroups = $uniquenessTest.DuplicateGroups
+                TotalDuplicates = $uniquenessTest.TotalDuplicates
+                Details = if ($CreateReports -and $uniquenessTest.DuplicateDetails) { $uniquenessTest.DuplicateDetails } else { @() }
+                PrimaryKeys = $primaryKeys  # Pass primary key info
+                Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
             }
             
             # Show examples
@@ -373,9 +353,16 @@ ORDER BY ku.ORDINAL_POSITION
             }
             
             # Prompt user or skip based on mode
-            if ($Analyze -or $Validate) {
-                # In analyze/validate mode, just record the duplicates
-                Write-Host "    [ANALYZED] Found duplicates" -ForegroundColor Yellow
+            if ($Preview) {
+                # In preview mode, show detailed analysis
+                Write-Host "    [PREVIEW] Found duplicates - export would prompt for action" -ForegroundColor Yellow
+                $skippedTables += @{
+                    TableName = $tableName
+                    Reason = "Has duplicates (would prompt in execute mode)"
+                    DuplicateGroups = $uniquenessTest.DuplicateGroups
+                    TotalDuplicates = $uniquenessTest.TotalDuplicates
+                    Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                }
                 continue
             } elseif ($SkipOnDuplicates) {
                 Write-Host "    [SKIP] Skipping table due to duplicates (SkipOnDuplicates)" -ForegroundColor Red
@@ -416,14 +403,26 @@ ORDER BY ku.ORDINAL_POSITION
             Write-Host " [OK]" -ForegroundColor Green
         }
         
-        # Skip actual export if in analyze or validate mode
-        if ($Analyze -or $Validate) {
-            if ($Analyze) {
-                Write-Host "Analyzing $tableName..." -ForegroundColor Yellow -NoNewline
+        # Skip actual export if in preview mode
+        if ($Preview) {
+            Write-Host "Would export $tableName..." -ForegroundColor Yellow -NoNewline
+            
+            # Quick count query to show what would be exported
+            $countCmd = $connection.CreateCommand()
+            if ($tableConfig.exportWhere) {
+                $countCmd.CommandText = "SELECT COUNT(*) FROM [$tableName] WHERE $($tableConfig.exportWhere)"
+                Write-Host " (filtered: $($tableConfig.exportWhere))" -ForegroundColor DarkGray -NoNewline
             } else {
-                Write-Host "Validating $tableName..." -ForegroundColor Yellow -NoNewline
+                $countCmd.CommandText = "SELECT COUNT(*) FROM [$tableName]"
             }
-            Write-Host " [OK]" -ForegroundColor Green
+            
+            try {
+                $count = $countCmd.ExecuteScalar()
+                Write-Host " [PREVIEW] $count rows" -ForegroundColor Green
+                $exportedCount++
+            } catch {
+                Write-Host " [ERROR] $($_.Exception.Message)" -ForegroundColor Red
+            }
             continue
         }
         
@@ -480,17 +479,30 @@ ORDER BY c.ORDINAL_POSITION
         }
         $reader.Close()
         
+        # Build column list excluding ignored columns
+        $exportColumns = @()
+        foreach ($col in $columns) {
+            if ($col.name -notin $tableConfig.ignoreColumns) {
+                $exportColumns += "[$($col.name)]"
+            }
+        }
+        $columnList = if ($exportColumns.Count -gt 0) { $exportColumns -join ", " } else { "*" }
+        
+        if ($ShowSQL -and $tableConfig.ignoreColumns.Count -gt 0) {
+            Write-Host "`n[DEBUG] Excluding ignored columns: $($tableConfig.ignoreColumns -join ', ')" -ForegroundColor DarkCyan
+        }
+        
         # Export data with optional WHERE clause
         $dataCmd = $connection.CreateCommand()
         if ($tableConfig.exportWhere) {
-            $dataCmd.CommandText = "SELECT * FROM [$tableName] WHERE $($tableConfig.exportWhere)"
+            $dataCmd.CommandText = "SELECT $columnList FROM [$tableName] WHERE $($tableConfig.exportWhere)"
             Write-Host " (filtered: $($tableConfig.exportWhere))" -ForegroundColor DarkGray -NoNewline
             if ($ShowSQL) {
                 Write-Host "`n[DEBUG] Executing data export query:" -ForegroundColor DarkCyan
                 Write-Host $dataCmd.CommandText -ForegroundColor DarkGray
             }
         } else {
-            $dataCmd.CommandText = "SELECT * FROM [$tableName]"
+            $dataCmd.CommandText = "SELECT $columnList FROM [$tableName]"
             if ($ShowSQL) {
                 Write-Host "`n[DEBUG] Executing data export query:" -ForegroundColor DarkCyan
                 Write-Host $dataCmd.CommandText -ForegroundColor DarkGray
@@ -537,6 +549,14 @@ ORDER BY c.ORDINAL_POSITION
             Write-Host "[DEBUG] Total rows exported: $rowCount" -ForegroundColor DarkCyan
         }
         
+        # Filter columns to only include exported ones
+        $exportedColumnInfo = @()
+        foreach ($col in $columns) {
+            if ($col.name -notin $tableConfig.ignoreColumns) {
+                $exportedColumnInfo += $col
+            }
+        }
+        
         # Create export object
         $export = @{
             metadata = @{
@@ -551,7 +571,7 @@ ORDER BY c.ORDINAL_POSITION
                 ignoreColumns = $tableConfig.ignoreColumns
                 allowDeletes = $tableConfig.allowDeletes
             }
-            columns = $columns
+            columns = $exportedColumnInfo
             data = $data
         }
         
@@ -559,9 +579,16 @@ ORDER BY c.ORDINAL_POSITION
         $outputFile = Join-Path $exportPath "$tableName.json"
         $export | ConvertTo-Json -Depth 10 -Compress | Out-File -FilePath $outputFile -Encoding UTF8
         
-        $fileSize = (Get-Item $outputFile).Length / 1KB
-        Write-Host " [OK] $rowCount rows, $('{0:N0}' -f $fileSize) KB" -ForegroundColor Green
+        $fileSize = (Get-Item $outputFile).Length
+        Write-Host " [OK] $rowCount rows, $('{0:N0}' -f ($fileSize / 1KB)) KB" -ForegroundColor Green
         $exportedCount++
+        
+        # Track exported table info for report
+        $exportedTablesInfo += @{
+            TableName = $tableName
+            RowCount = $rowCount
+            FileSize = $fileSize
+        }
     }
     
 } catch {
@@ -573,27 +600,194 @@ ORDER BY c.ORDINAL_POSITION
     }
 }
 
-if ($Analyze) {
-    Write-Host "`n=== ANALYSIS COMPLETE ===" -ForegroundColor Cyan
-    Write-Host "Analyzed: $($tablesToExport.Count) tables" -ForegroundColor Green
-    Write-Host "No data was exported (analyze mode)" -ForegroundColor Yellow
-} elseif ($Validate) {
-    Write-Host "`n=== VALIDATION COMPLETE ===" -ForegroundColor Cyan
-    Write-Host "Validated: $($tablesToExport.Count) tables" -ForegroundColor Green
-    Write-Host "No data was exported (validate mode)" -ForegroundColor Yellow
+if ($Preview) {
+    Write-Host "`n=== PREVIEW COMPLETE ===" -ForegroundColor Cyan
+    Write-Host "Total tables analyzed: $($tablesToExport.Count)" -ForegroundColor White
+    Write-Host "Would export: $exportedCount tables" -ForegroundColor Green
+    if ($skippedTables.Count -gt 0) {
+        Write-Host "Would skip: $($skippedTables.Count) tables (duplicates)" -ForegroundColor Yellow
+    }
+    
+    # Show duplicate statistics like Analyze did
+    if ($duplicateProblems.Count -gt 0) {
+        $totalDuplicateRecords = ($duplicateProblems | Measure-Object -Property TotalDuplicates -Sum).Sum
+        $totalDuplicateGroups = ($duplicateProblems | Measure-Object -Property DuplicateGroups -Sum).Sum
+        Write-Host "`nDuplicate statistics:" -ForegroundColor Yellow
+        Write-Host "  Tables with duplicates: $($duplicateProblems.Count)" -ForegroundColor Gray
+        Write-Host "  Total duplicate records: $totalDuplicateRecords" -ForegroundColor Gray
+        Write-Host "  Total duplicate groups: $totalDuplicateGroups" -ForegroundColor Gray
+    }
+    
+    Write-Host "`nNo data exported (preview mode)" -ForegroundColor Gray
+    Write-Host "Run with -Execute flag in syncray.ps1 to perform export" -ForegroundColor Cyan
 } else {
-    Write-Host "`n=== EXPORT COMPLETE ===" -ForegroundColor Cyan
-    Write-Host "Exported: $exportedCount tables" -ForegroundColor Green
-    Write-Host "Location: $exportPath" -ForegroundColor Gray
+    # Calculate duration
+    $exportEndTime = Get-Date
+    $duration = $exportEndTime - $exportStartTime
+    
+    Write-Host "`n=== EXPORT EXECUTION REPORT ===" -ForegroundColor Cyan
+    Write-Host "Start time: $($exportStartTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Gray
+    Write-Host "End time: $($exportEndTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Gray
+    Write-Host "Duration: $($duration.TotalSeconds) seconds" -ForegroundColor Gray
+    
+    Write-Host "`nEXPORTED TABLES:" -ForegroundColor White
+    foreach ($tableInfo in $exportedTablesInfo) {
+        Write-Host "✓ $($tableInfo.TableName)" -ForegroundColor Green -NoNewline
+        Write-Host " - $($tableInfo.RowCount) rows ($('{0:N0}' -f ($tableInfo.FileSize / 1KB)) KB)" -ForegroundColor Gray
+    }
+    
+    if ($skippedTables.Count -gt 0) {
+        Write-Host "`nSKIPPED TABLES:" -ForegroundColor Yellow
+        foreach ($skipped in $skippedTables) {
+            Write-Host "✗ $($skipped.TableName)" -ForegroundColor Red -NoNewline
+            Write-Host " - $($skipped.Reason)" -ForegroundColor Gray
+        }
+    }
+    
+    Write-Host "`nSUMMARY:" -ForegroundColor White
+    Write-Host "- Total tables processed: $($tablesToExport.Count)" -ForegroundColor Gray
+    Write-Host "- Successfully exported: $exportedCount" -ForegroundColor $(if ($exportedCount -eq $tablesToExport.Count) { "Green" } else { "Yellow" })
+    Write-Host "- Skipped: $($skippedTables.Count)" -ForegroundColor $(if ($skippedTables.Count -gt 0) { "Yellow" } else { "Green" })
+    
+    if ($exportedTablesInfo.Count -gt 0) {
+        $totalRows = ($exportedTablesInfo | Measure-Object -Property RowCount -Sum).Sum
+        $totalSize = ($exportedTablesInfo | Measure-Object -Property FileSize -Sum).Sum
+        Write-Host "- Total rows exported: $('{0:N0}' -f $totalRows)" -ForegroundColor Gray
+        Write-Host "- Total size: $('{0:N0}' -f ($totalSize / 1KB)) KB" -ForegroundColor Gray
+    }
+    
+    if ($duplicateProblems.Count -gt 0) {
+        Write-Host "`nISSUES:" -ForegroundColor Yellow
+        foreach ($problem in $duplicateProblems) {
+            Write-Host "- $($problem.TableName): $($problem.TotalDuplicates) duplicate records in $($problem.DuplicateGroups) groups" -ForegroundColor Yellow
+        }
+    }
+    
+    Write-Host "`nExport location: $exportPath" -ForegroundColor Gray
+    
+    # Generate operation documentation if requested (for actual export operations)
+    if ($CreateReports) {
+        Write-Host "`nCreating export documentation..." -ForegroundColor Yellow
+        
+        # Create operation report directory
+        if (-not (Test-Path $ReportPath)) {
+            New-Item -Path $ReportPath -ItemType Directory -Force | Out-Null
+        }
+        
+        # Generate export operation documentation
+        $operationDoc = @{
+            timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            operation = "export"
+            mode = "execute"
+            database = @{
+                key = $From
+                server = $sourceDb.server
+                database = $sourceDb.database
+            }
+            exportStatistics = @{
+                totalTables = $tablesToExport.Count
+                exportedTables = $exportedCount
+                skippedTables = $skippedTables.Count
+                tablesWithDuplicates = $duplicateProblems.Count
+            }
+            exportResults = $tablesToExport | ForEach-Object {
+                $tableName = $_
+                $wasExported = $exportedCount -gt 0  # This is a simplified check
+                $duplicateProblem = $duplicateProblems | Where-Object { $_.TableName -eq $tableName }
+                $skippedProblem = $skippedTables | Where-Object { $_.TableName -eq $tableName }
+                
+                @{
+                    tableName = $tableName
+                    exported = $wasExported -and (-not $skippedProblem)
+                    hasDuplicates = $duplicateProblem -ne $null
+                    duplicateGroups = if ($duplicateProblem) { $duplicateProblem.DuplicateGroups } else { 0 }
+                    totalDuplicates = if ($duplicateProblem) { $duplicateProblem.TotalDuplicates } else { 0 }
+                    skipReason = if ($skippedProblem) { $skippedProblem.Reason } else { $null }
+                }
+            }
+            summary = @{
+                success = $exportedCount -gt 0
+                exportPath = $exportPath
+                totalProblems = $duplicateProblems.Count + $skippedTables.Count
+            }
+        }
+        
+        # Save JSON operation documentation
+        $jsonDocPath = Join-Path $ReportPath "export_log.json"
+        $operationDoc | ConvertTo-Json -Depth 10 | Out-File -FilePath $jsonDocPath -Encoding UTF8
+        
+        # Save CSV summary
+        $csvDocPath = Join-Path $ReportPath "export_summary.csv"
+        $operationDoc.exportResults | ForEach-Object {
+            [PSCustomObject][ordered]@{
+                Timestamp = $operationDoc.timestamp
+                Database = $From
+                TableName = $_.tableName
+                Exported = $_.exported
+                HasDuplicates = $_.hasDuplicates
+                DuplicateGroups = $_.duplicateGroups
+                TotalDuplicates = $_.totalDuplicates
+                SkipReason = $_.skipReason
+            }
+        } | Export-Csv -Path $csvDocPath -NoTypeInformation -Encoding UTF8
+        
+        Write-Host "  Export log: $jsonDocPath" -ForegroundColor Gray
+        Write-Host "  Export summary: $csvDocPath" -ForegroundColor Gray
+        
+        # Generate Markdown report
+        $markdownPath = Join-Path $ReportPath "export_report.md"
+        $markdown = @"
+# Export Report
+
+**Date**: $($operationDoc.timestamp)  
+**Operation**: Export  
+**Mode**: Execute  
+**Database**: $From ($($sourceDb.server)/$($sourceDb.database))
+
+## Summary
+
+- **Total tables**: $($operationDoc.exportStatistics.totalTables)
+- **Successfully exported**: $($operationDoc.exportStatistics.exportedTables)
+- **Skipped**: $($operationDoc.exportStatistics.skippedTables)
+- **Tables with duplicates**: $($operationDoc.exportStatistics.tablesWithDuplicates)
+
+## Exported Tables
+
+| Table | Rows | Size (KB) |
+|-------|------|----------|
+"@
+        foreach ($tableInfo in $exportedTablesInfo) {
+            $markdown += "`n| $($tableInfo.TableName) | $('{0:N0}' -f $tableInfo.RowCount) | $('{0:N0}' -f ($tableInfo.FileSize / 1KB)) |"
+        }
+        
+        if ($skippedTables.Count -gt 0) {
+            $markdown += @"
+
+## Skipped Tables
+
+| Table | Reason | Duplicate Groups | Total Duplicates |
+|-------|--------|------------------|------------------|
+"@
+            foreach ($skipped in $skippedTables) {
+                $markdown += "`n| $($skipped.TableName) | $($skipped.Reason) | $($skipped.DuplicateGroups) | $($skipped.TotalDuplicates) |"
+            }
+        }
+        
+        $markdown += @"
+
+## Export Location
+
+``$exportPath``
+"@
+        
+        $markdown | Out-File -FilePath $markdownPath -Encoding UTF8
+        Write-Host "  Export report: $markdownPath" -ForegroundColor Gray
+    }
 }
 
 # Export problems to CSV if requested
-if (($Analyze -or $CreateReports) -and (($duplicateProblems.Count -gt 0) -or ($skippedTables.Count -gt 0))) {
-    if ($Analyze) {
-        Write-Host "`nCreating analysis reports..." -ForegroundColor Yellow
-    } else {
-        Write-Host "`nCreating problem reports..." -ForegroundColor Yellow
-    }
+if ($CreateReports -and (($duplicateProblems.Count -gt 0) -or ($skippedTables.Count -gt 0))) {
+    Write-Host "`nCreating problem reports..." -ForegroundColor Yellow
     
     # Export duplicates CSV - one file per table
     if ($duplicateProblems.Count -gt 0) {
@@ -603,6 +797,19 @@ if (($Analyze -or $CreateReports) -and (($duplicateProblems.Count -gt 0) -or ($s
             New-Item -Path $duplicatesDir -ItemType Directory -Force | Out-Null
         }
         
+        # First create a summary info file
+        $duplicatesSummaryPath = Join-Path $duplicatesDir "duplicates_info.csv"
+        $duplicateProblems | ForEach-Object {
+            [PSCustomObject][ordered]@{
+                TableName = $_.TableName
+                MatchOnFields = $_.MatchOnFields
+                DuplicateGroups = $_.DuplicateGroups
+                TotalDuplicates = $_.TotalDuplicates
+                DetailFile = "$($_.TableName)_duplicates.csv"
+            }
+        } | Export-Csv -Path $duplicatesSummaryPath -NoTypeInformation -Encoding UTF8 -UseCulture
+        Write-Host "  Duplicates summary: $duplicatesSummaryPath" -ForegroundColor Gray
+        
         # Export each table's duplicates to its own file
         foreach ($tableProblem in $duplicateProblems) {
             $tableCsvPath = Join-Path $duplicatesDir "$($tableProblem.TableName)_duplicates.csv"
@@ -611,7 +818,7 @@ if (($Analyze -or $CreateReports) -and (($duplicateProblems.Count -gt 0) -or ($s
             } else {
                 Export-DuplicatesToCSV -DuplicateProblems @($tableProblem) -OutputPath $tableCsvPath
             }
-            Write-Host "  $($tableProblem.TableName): $tableCsvPath" -ForegroundColor Gray
+            Write-Host "  $($tableProblem.TableName) details: $tableCsvPath" -ForegroundColor Gray
         }
         
     }
@@ -626,26 +833,75 @@ if (($Analyze -or $CreateReports) -and (($duplicateProblems.Count -gt 0) -or ($s
         }
         Write-Host "  Skipped tables report: $skippedCsvPath" -ForegroundColor Gray
     }
-}
+    
+    # Generate Markdown analysis report
+    $markdownPath = Join-Path $ReportPath "analysis_report.md"
+    $markdown = @"
+# Export Analysis Report
 
-# Show summary statistics for analyze mode
-if ($Analyze) {
-    Write-Host "`n=== ANALYSIS SUMMARY ===" -ForegroundColor Cyan
-    Write-Host "Total tables analyzed: $($tablesToExport.Count)" -ForegroundColor White
-    Write-Host "Tables with duplicates: $($duplicateProblems.Count)" -ForegroundColor $(if ($duplicateProblems.Count -gt 0) { "Yellow" } else { "Green" })
-    Write-Host "Tables skipped: $($skippedTables.Count)" -ForegroundColor $(if ($skippedTables.Count -gt 0) { "Yellow" } else { "Green" })
+**Date**: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")  
+**Operation**: Export Analysis  
+**Mode**: Preview  
+**Database**: $From ($($sourceDb.server)/$($sourceDb.database))
+
+## Summary
+
+- **Total tables analyzed**: $($tablesToExport.Count)
+- **Tables ready for export**: $exportedCount
+- **Tables with issues**: $($skippedTables.Count)
+- **Tables with duplicates**: $($duplicateProblems.Count)
+"@
     
     if ($duplicateProblems.Count -gt 0) {
         $totalDuplicateRecords = ($duplicateProblems | Measure-Object -Property TotalDuplicates -Sum).Sum
         $totalDuplicateGroups = ($duplicateProblems | Measure-Object -Property DuplicateGroups -Sum).Sum
-        Write-Host "`nDuplicate statistics:" -ForegroundColor Yellow
-        Write-Host "  Total duplicate records: $totalDuplicateRecords" -ForegroundColor Gray
-        Write-Host "  Total duplicate groups: $totalDuplicateGroups" -ForegroundColor Gray
+        
+        $markdown += @"
+
+## Duplicate Analysis
+
+**Total duplicate records**: $totalDuplicateRecords  
+**Total duplicate groups**: $totalDuplicateGroups
+
+| Table | Match Fields | Duplicate Groups | Total Duplicates |
+|-------|--------------|------------------|------------------|
+"@
+        foreach ($problem in $duplicateProblems) {
+            $markdown += "`n| $($problem.TableName) | $($problem.MatchOnFields) | $($problem.DuplicateGroups) | $($problem.TotalDuplicates) |"
+        }
     }
     
-    Write-Host "`nAnalysis reports saved to: $ReportPath" -ForegroundColor Gray
-    Write-Host "To export data, run without -Analyze parameter" -ForegroundColor Cyan
+    if ($skippedTables.Count -gt 0) {
+        $markdown += @"
+
+## Tables to Skip
+
+| Table | Reason |
+|-------|--------|
+"@
+        foreach ($skipped in $skippedTables) {
+            $markdown += "`n| $($skipped.TableName) | $($skipped.Reason) |"
+        }
+    }
+    
+    $markdown += @"
+
+## Recommendations
+
+"@
+    if ($duplicateProblems.Count -gt 0) {
+        $markdown += @"
+- Review and resolve duplicate records before export
+- Consider updating matchOn fields to ensure uniqueness
+- Or use -SkipOnDuplicates to skip tables with duplicates
+"@
+    }
+    
+    $markdown | Out-File -FilePath $markdownPath -Encoding UTF8
+    Write-Host "  Analysis report: $markdownPath" -ForegroundColor Gray
 }
+
+# Summary statistics are now shown in Preview mode above
 
 Write-Host ""
 

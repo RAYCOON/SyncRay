@@ -1,7 +1,7 @@
 # sync-import.ps1 - Import/sync tables to target database
-[CmdletBinding(DefaultParameterSetName='Import')]
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true, ParameterSetName='Import')]
+    [Parameter(Mandatory=$true)]
     [string]$To,
     
     [Parameter(Mandatory=$false)]
@@ -14,9 +14,15 @@ param(
     [switch]$Execute,  # Actually perform the sync (default is dry-run)
     
     [Parameter(Mandatory=$false)]
+    [switch]$CreateReports,  # Create analysis/operation reports
+    
+    [Parameter(Mandatory=$false)]
+    [string]$ReportPath,  # Path for reports
+    
+    [Parameter(Mandatory=$false)]
     [switch]$ShowSQL,  # Show SQL statements for debugging
     
-    [Parameter(Mandatory=$false, ParameterSetName='Help')]
+    [Parameter(Mandatory=$false)]
     [switch]$Help  # Show help information
 )
 
@@ -27,7 +33,7 @@ if ($Help) {
 
 DESCRIPTION:
     Imports data from JSON files to target database for synchronization.
-    Supports dry-run preview and transactional execution.
+    Supports dry-run preview, target analysis, and transactional execution.
 
 SYNTAX:
     sync-import.ps1 -To <database> [options]
@@ -128,22 +134,206 @@ if ($targetDb.auth -eq "sql") {
     }
 }
 
-Write-Host "`n=== SYNC IMPORT ===" -ForegroundColor Cyan
-Write-Host "Target: $To ($($targetDb.server))" -ForegroundColor White
-Write-Host "Mode: $(if ($Execute) { 'EXECUTE' } else { 'DRY-RUN' })" -ForegroundColor $(if ($Execute) { 'Yellow' } else { 'Green' })
+# Track timing for performance reporting
+$importStartTime = Get-Date
 
-# Run validation before proceeding
-$validation = Test-SyncConfiguration -Config $config -DatabaseKey $To -Mode "import" -ShowSQL:$ShowSQL
+# Determine action mode
+$actionMode = "preview"
+if ($Execute) {
+    $actionMode = "execute"
+    Write-Host "`n=== SYNC IMPORT ===" -ForegroundColor Cyan
+} else {
+    Write-Host "`n=== SYNC IMPORT PREVIEW ===" -ForegroundColor Cyan
+}
+
+Write-Host "Target: $To ($($targetDb.server))" -ForegroundColor White
+Write-Host "Mode: $(if ($Execute) { 'EXECUTE' } else { 'PREVIEW' })" -ForegroundColor $(if ($Execute) { 'Yellow' } else { 'Green' })
+
+# Set report path if needed
+if ($CreateReports) {
+    if (-not $ReportPath) {
+        $timestamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
+        $ReportPath = Join-Path (Split-Path $exportPath) "reports/$timestamp"
+    }
+}
+
+# Run validation
+$validationParams = @{
+    Config = $config
+    DatabaseKey = $To
+    Mode = "import"
+    ShowSQL = $ShowSQL
+}
+if ($Tables) {
+    $tableNames = $Tables -split "," | ForEach-Object { $_.Trim() }
+    $validationParams['TablesToValidate'] = $tableNames
+}
+$validation = Test-SyncConfiguration @validationParams
 if (-not $validation.Success) {
     Write-Host "`n[ABORTED] Configuration validation failed" -ForegroundColor Red
     exit 1
+}
+
+# In preview mode, perform compatibility analysis
+if ($actionMode -eq "preview") {
+    Write-Host "`n=== ANALYZING TARGET DATABASE ===" -ForegroundColor Yellow
+    
+    # Check which JSON files exist
+    Write-Host "`nChecking available export files..." -ForegroundColor Cyan
+    $availableExports = @()
+    $missingExports = @()
+    
+    # Determine which configs to check based on Tables parameter
+    $configsToCheck = if ($Tables) {
+        $tableNames = $Tables -split "," | ForEach-Object { $_.Trim() }
+        $config.syncTables | Where-Object { 
+            $targetName = if ([string]::IsNullOrWhiteSpace($_.targetTable)) { $_.sourceTable } else { $_.targetTable }
+            $targetName -in $tableNames -or $_.sourceTable -in $tableNames
+        }
+    } else {
+        $config.syncTables
+    }
+    
+    foreach ($syncConfig in $configsToCheck) {
+        $jsonFile = Join-Path $exportPath "$($syncConfig.sourceTable).json"
+        if (Test-Path $jsonFile) {
+            $availableExports += $syncConfig.sourceTable
+            Write-Host "  ✓ $($syncConfig.sourceTable).json found" -ForegroundColor Green
+        } else {
+            $missingExports += $syncConfig.sourceTable
+            Write-Host "  ✗ $($syncConfig.sourceTable).json missing" -ForegroundColor Red
+        }
+    }
+    
+    Write-Host "`n=== ANALYSIS SUMMARY ===" -ForegroundColor Cyan
+    Write-Host "Target database: $To" -ForegroundColor White
+    Write-Host "Tables configured: $($configsToCheck.Count)" -ForegroundColor White
+    Write-Host "Export files available: $($availableExports.Count)" -ForegroundColor $(if ($availableExports.Count -eq $configsToCheck.Count) { "Green" } else { "Yellow" })
+    Write-Host "Export files missing: $($missingExports.Count)" -ForegroundColor $(if ($missingExports.Count -gt 0) { "Red" } else { "Green" })
+    
+    if ($validation.Errors.Count -gt 0) {
+        Write-Host "`nValidation issues:" -ForegroundColor Red
+        foreach ($error in $validation.Errors) {
+            Write-Host "  - $error" -ForegroundColor Red
+        }
+    }
+    
+    if ($CreateReports) {
+        Write-Host "`nCreating target database analysis report..." -ForegroundColor Yellow
+        
+        # Create analysis report directory
+        if (-not (Test-Path $ReportPath)) {
+            New-Item -Path $ReportPath -ItemType Directory -Force | Out-Null
+        }
+        
+        # Generate target database analysis report
+        $analysisReport = @{
+            timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            database = @{
+                key = $To
+                server = $targetDb.server
+                database = $targetDb.database
+            }
+            validation = $validation
+            exportFiles = $exportFilesAnalysis
+            summary = @{
+                validationSuccess = $validation.Success
+                totalExportFiles = $exportFilesAnalysis.Count
+                missingFiles = ($exportFilesAnalysis | Where-Object { -not $_.exists }).Count
+                validationErrors = $validation.Errors.Count
+            }
+        }
+        
+        # Save JSON report
+        $jsonReportPath = Join-Path $ReportPath "target_analysis.json"
+        $analysisReport | ConvertTo-Json -Depth 10 | Out-File -FilePath $jsonReportPath -Encoding UTF8
+        
+        # Save CSV summary if there are validation errors
+        if ($validation.Errors.Count -gt 0) {
+            $csvReportPath = Join-Path $ReportPath "validation_issues.csv"
+            $validation.Errors | ForEach-Object { 
+                [PSCustomObject][ordered]@{
+                    Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                    Database = $To
+                    Issue = $_
+                }
+            } | Export-Csv -Path $csvReportPath -NoTypeInformation -Encoding UTF8
+            Write-Host "  Validation issues: $csvReportPath" -ForegroundColor Gray
+        }
+        
+        Write-Host "  Analysis report: $jsonReportPath" -ForegroundColor Gray
+        
+        # Generate Markdown analysis report
+        $markdownPath = Join-Path $ReportPath "target_analysis.md"
+        $markdown = @"
+# Target Database Analysis Report
+
+**Date**: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")  
+**Target Database**: $To ($($targetDb.server)/$($targetDb.database))
+
+## Export Files Status
+
+- **Tables configured**: $($config.syncTables.Count)
+- **Export files available**: $($availableExports.Count)
+- **Export files missing**: $($missingExports.Count)
+
+### Available Files
+"@
+        foreach ($table in $availableExports) {
+            $markdown += "`n- ✓ $table.json"
+        }
+        
+        if ($missingExports.Count -gt 0) {
+            $markdown += "`n`n### Missing Files"
+            foreach ($table in $missingExports) {
+                $markdown += "`n- ✗ $table.json"
+            }
+        }
+        
+        if ($validation.Errors.Count -gt 0) {
+            $markdown += @"
+
+## Validation Issues
+
+"@
+            foreach ($error in $validation.Errors) {
+                $markdown += "- $error`n"
+            }
+        }
+        
+        if ($validation.Warnings.Count -gt 0) {
+            $markdown += @"
+
+## Warnings
+
+"@
+            foreach ($warning in $validation.Warnings) {
+                $markdown += "- $warning`n"
+            }
+        }
+        
+        $markdown | Out-File -FilePath $markdownPath -Encoding UTF8
+        Write-Host "  Analysis report (Markdown): $markdownPath" -ForegroundColor Gray
+    }
+    
+    # Continue to normal preview if export files are available
+    if ($availableExports.Count -eq 0) {
+        Write-Host "`nNo export files available for import preview" -ForegroundColor Yellow
+        Write-Host ""
+        exit 0
+    }
+    
+    Write-Host "`n=== IMPORT PREVIEW ===" -ForegroundColor Cyan
 }
 
 # Determine which sync configs to process
 if ($Tables) {
     # Filter configs by specified tables
     $tableNames = $Tables -split "," | ForEach-Object { $_.Trim() }
-    $syncConfigs = $config.syncTables | Where-Object { $_.targetTable -in $tableNames }
+    $syncConfigs = $config.syncTables | Where-Object { 
+        $targetName = if ([string]::IsNullOrWhiteSpace($_.targetTable)) { $_.sourceTable } else { $_.targetTable }
+        $targetName -in $tableNames -or $_.sourceTable -in $tableNames
+    }
 } else {
     # Use all sync configs
     $syncConfigs = $config.syncTables
@@ -163,8 +353,10 @@ try {
         $targetTable = if ([string]::IsNullOrWhiteSpace($syncConfig.targetTable)) { $sourceTable } else { $syncConfig.targetTable }
         $jsonFile = Join-Path $exportPath "$sourceTable.json"
         
+        $displayName = if ($sourceTable -eq $targetTable) { $targetTable } else { "$sourceTable -> $targetTable" }
+        
         if (-not (Test-Path $jsonFile)) {
-            Write-Host "$sourceTable -> $targetTable... [SKIP] No export file found" -ForegroundColor DarkGray
+            Write-Host "$displayName... [SKIP] No export file found" -ForegroundColor DarkGray
             $tableResult = @{
                 table = $displayName
                 inserts = 0
@@ -179,8 +371,6 @@ try {
             $tableResults += $tableResult
             continue
         }
-        
-        $displayName = if ($sourceTable -eq $targetTable) { $targetTable } else { "$sourceTable -> $targetTable" }
         Write-Host "`nAnalyzing $displayName..." -ForegroundColor Gray
         
         # Load export data
@@ -416,13 +606,6 @@ try {
 # Check if we have any changes
 $hasChanges = $totalChanges.inserts -gt 0 -or $totalChanges.updates -gt 0 -or $totalChanges.deletes -gt 0
 
-if (-not $hasChanges) {
-    # No changes needed
-    Write-Host "`n✓ All tables are in sync - no changes needed" -ForegroundColor Green
-    Write-Host ""
-    exit 0
-}
-
 # Show what was found in table format
 Write-Host "`n=== CHANGES DETECTED ===" -ForegroundColor Yellow
 Write-Host ""
@@ -493,6 +676,13 @@ if ($totalChanges.deletes -gt 0) {
     Write-Host "  → $($totalChanges.deletes) rows to delete" -ForegroundColor Red 
 }
 
+# If no changes, show message and exit
+if (-not $hasChanges) {
+    Write-Host "✓ All tables are in sync - no changes needed" -ForegroundColor Green
+    Write-Host ""
+    exit 0
+}
+
 # Safety confirmation for execute mode
 if ($Execute) {
     Write-Host "`n⚠️  WARNING: You are about to modify the database!" -ForegroundColor Yellow
@@ -557,6 +747,15 @@ if ($Execute) {
                         }
                         
                         $value = $insert.data.$key
+                        
+                        # Skip array values (typically timestamp/rowversion columns)
+                        if ($value -is [array]) {
+                            if ($ShowSQL) {
+                                Write-Host "[DEBUG] Skipping column $key with array value (likely timestamp)" -ForegroundColor DarkYellow
+                            }
+                            continue
+                        }
+                        
                         $columns += "[$key]"
                         $paramName = "@p$($parameters.Count)"
                         $values += $paramName
@@ -716,6 +915,11 @@ if ($Execute) {
                                 if ($ShowSQL) {
                                     Write-Host "[DEBUG] SET Parameter $($param.name) = $($param.value) (Boolean)" -ForegroundColor DarkCyan
                                 }
+                            }
+                            elseif ($param.value -is [array]) {
+                                # Skip array values (typically timestamp/rowversion columns)
+                                Write-Host "`n[WARNING] Skipping array value for column $($change.field) - likely timestamp column" -ForegroundColor Yellow
+                                continue
                             }
                             else {
                                 $updateCmd.Parameters.AddWithValue($param.name, $param.value) | Out-Null
@@ -883,14 +1087,230 @@ if ($Execute) {
         $totalRow += $executionStats.updates.ToString().PadLeft(7) + " | "
         $totalRow += $executionStats.deletes.ToString().PadLeft(7)
         Write-Host $totalRow -ForegroundColor White
+        
+        # Generate operation documentation if requested
+        if ($CreateReports) {
+            Write-Host "`nCreating operation documentation..." -ForegroundColor Yellow
+            
+            # Create operation report directory
+            if (-not (Test-Path $ReportPath)) {
+                New-Item -Path $ReportPath -ItemType Directory -Force | Out-Null
+            }
+            
+            # Generate operation documentation
+            $operationDoc = @{
+                timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                operation = "import"
+                mode = "execute"
+                database = @{
+                    key = $To
+                    server = $targetDb.server
+                    database = $targetDb.database
+                }
+                executionStatistics = $executionStats
+                tableResults = $allChanges | ForEach-Object {
+                    @{
+                        sourceTable = $_.syncConfig.sourceTable
+                        targetTable = $_.targetTable
+                        changes = @{
+                            inserts = $_.changes.inserts.Count
+                            updates = $_.changes.updates.Count
+                            deletes = $_.changes.deletes.Count
+                        }
+                        executed = if ($_.ContainsKey('successCount')) { $_.successCount } else { $_.changes }
+                        success = $_.ContainsKey('successCount')
+                    }
+                }
+                summary = @{
+                    success = $executionSuccess
+                    totalTables = $syncConfigs.Count
+                    totalChanges = $executionStats.inserts + $executionStats.updates + $executionStats.deletes
+                }
+            }
+            
+            # Save JSON operation documentation
+            $jsonDocPath = Join-Path $ReportPath "operation_log.json"
+            $operationDoc | ConvertTo-Json -Depth 10 | Out-File -FilePath $jsonDocPath -Encoding UTF8
+            
+            # Save CSV summary
+            $csvDocPath = Join-Path $ReportPath "execution_summary.csv"
+            $operationDoc.tableResults | ForEach-Object {
+                [PSCustomObject][ordered]@{
+                    Timestamp = $operationDoc.timestamp
+                    Database = $To
+                    SourceTable = $_.sourceTable
+                    TargetTable = $_.targetTable
+                    Inserts = $_.executed.inserts
+                    Updates = $_.executed.updates
+                    Deletes = $_.executed.deletes
+                    Success = $_.success
+                }
+            } | Export-Csv -Path $csvDocPath -NoTypeInformation -Encoding UTF8
+            
+            Write-Host "  Operation log: $jsonDocPath" -ForegroundColor Gray
+            Write-Host "  Execution summary: $csvDocPath" -ForegroundColor Gray
+            
+            # Generate Markdown execution report
+            $markdownPath = Join-Path $ReportPath "execution_report.md"
+            $markdown = @"
+# Import Execution Report
+
+**Date**: $($operationDoc.timestamp)  
+**Operation**: Import  
+**Mode**: Execute  
+**Target Database**: $To ($($targetDb.server)/$($targetDb.database))  
+**Duration**: $($duration.TotalSeconds) seconds
+
+## Execution Summary
+
+- **Total tables processed**: $($operationDoc.summary.totalTables)
+- **Total operations**: $($operationDoc.summary.totalChanges)
+- **Status**: $(if ($operationDoc.summary.success) { '✓ Success' } else { '✗ Failed' })
+
+## Operations by Table
+
+| Table | Inserts | Updates | Deletes | Status |
+|-------|---------|---------|---------|--------|
+"@
+            foreach ($result in $operationDoc.tableResults) {
+                $status = if ($result.success) { '✓' } else { '✗' }
+                $tableName = if ($result.sourceTable -eq $result.targetTable) { $result.targetTable } else { "$($result.sourceTable) → $($result.targetTable)" }
+                $markdown += "`n| $tableName | $($result.executed.inserts) | $($result.executed.updates) | $($result.executed.deletes) | $status |"
+            }
+            
+            $markdown += @"
+
+## Total Operations
+
+- **Inserts**: $($executionStats.inserts)
+- **Updates**: $($executionStats.updates)
+- **Deletes**: $($executionStats.deletes)
+"@
+            
+            $markdown | Out-File -FilePath $markdownPath -Encoding UTF8
+            Write-Host "  Execution report: $markdownPath" -ForegroundColor Gray
+        }
     } else {
         Write-Host "`n✗ Execution failed - some changes may not have been applied" -ForegroundColor Red
         exit 1
     }
 } else {
-    # Dry-run mode
-    Write-Host "`n[DRY-RUN] No changes were made" -ForegroundColor Cyan
-    Write-Host "Run with -Execute to apply these changes" -ForegroundColor Gray
+    # Preview mode - show detailed summary
+    $importEndTime = Get-Date
+    $duration = $importEndTime - $importStartTime
+    
+    Write-Host "`n=== PREVIEW COMPLETE ===" -ForegroundColor Cyan
+    Write-Host "Duration: $($duration.TotalSeconds) seconds" -ForegroundColor Gray
+    
+    Write-Host "`nSUMMARY:" -ForegroundColor White
+    Write-Host "- Total tables analyzed: $($syncConfigs.Count)" -ForegroundColor Gray
+    Write-Host "- Total changes found: $($totalChanges.inserts + $totalChanges.updates + $totalChanges.deletes)" -ForegroundColor Yellow
+    Write-Host "  - Inserts needed: $($totalChanges.inserts)" -ForegroundColor Gray
+    Write-Host "  - Updates needed: $($totalChanges.updates)" -ForegroundColor Gray
+    Write-Host "  - Deletes needed: $($totalChanges.deletes)" -ForegroundColor Gray
+    
+    Write-Host "`nNo changes were made (preview mode)" -ForegroundColor Gray
+    Write-Host "Run with -Execute flag in syncray.ps1 to apply changes" -ForegroundColor Cyan
+    
+    # Generate preview documentation if requested
+    if ($CreateReports) {
+        Write-Host "`nCreating preview documentation..." -ForegroundColor Yellow
+        
+        # Create preview report directory
+        if (-not (Test-Path $ReportPath)) {
+            New-Item -Path $ReportPath -ItemType Directory -Force | Out-Null
+        }
+        
+        # Generate preview documentation
+        $previewDoc = @{
+            timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            operation = "import"
+            mode = "preview"
+            database = @{
+                key = $To
+                server = $targetDb.server
+                database = $targetDb.database
+            }
+            plannedChanges = $totalChanges
+            tableResults = $allChanges | ForEach-Object {
+                @{
+                    sourceTable = $_.syncConfig.sourceTable
+                    targetTable = $_.targetTable
+                    changes = @{
+                        inserts = $_.changes.inserts.Count
+                        updates = $_.changes.updates.Count
+                        deletes = $_.changes.deletes.Count
+                    }
+                }
+            }
+            summary = @{
+                totalTables = $syncConfigs.Count
+                totalChanges = $totalChanges.inserts + $totalChanges.updates + $totalChanges.deletes
+                wouldExecute = $true
+            }
+        }
+        
+        # Save JSON preview documentation
+        $jsonPreviewPath = Join-Path $ReportPath "preview_plan.json"
+        $previewDoc | ConvertTo-Json -Depth 10 | Out-File -FilePath $jsonPreviewPath -Encoding UTF8
+        
+        # Save CSV summary
+        $csvPreviewPath = Join-Path $ReportPath "preview_summary.csv"
+        $previewDoc.tableResults | ForEach-Object {
+            [PSCustomObject][ordered]@{
+                Timestamp = $previewDoc.timestamp
+                Database = $To
+                SourceTable = $_.sourceTable
+                TargetTable = $_.targetTable
+                PlannedInserts = $_.changes.inserts
+                PlannedUpdates = $_.changes.updates
+                PlannedDeletes = $_.changes.deletes
+            }
+        } | Export-Csv -Path $csvPreviewPath -NoTypeInformation -Encoding UTF8
+        
+        Write-Host "  Preview plan: $jsonPreviewPath" -ForegroundColor Gray
+        Write-Host "  Preview summary: $csvPreviewPath" -ForegroundColor Gray
+        
+        # Generate Markdown preview report
+        $markdownPath = Join-Path $ReportPath "preview_report.md"
+        $markdown = @"
+# Import Preview Report
+
+**Date**: $($previewDoc.timestamp)  
+**Operation**: Import Preview  
+**Mode**: Preview (Dry-Run)  
+**Target Database**: $To ($($targetDb.server)/$($targetDb.database))  
+**Duration**: $($duration.TotalSeconds) seconds
+
+## Planned Changes Summary
+
+- **Total tables to process**: $($previewDoc.summary.totalTables)
+- **Total changes to apply**: $($previewDoc.summary.totalChanges)
+  - **Inserts**: $($totalChanges.inserts)
+  - **Updates**: $($totalChanges.updates)
+  - **Deletes**: $($totalChanges.deletes)
+
+## Changes by Table
+
+| Table | Inserts | Updates | Deletes |
+|-------|---------|---------|---------|"@
+        foreach ($result in $previewDoc.tableResults) {
+            $tableName = if ($result.sourceTable -eq $result.targetTable) { $result.targetTable } else { "$($result.sourceTable) → $($result.targetTable)" }
+            $markdown += "`n| $tableName | $($result.changes.inserts) | $($result.changes.updates) | $($result.changes.deletes) |"
+        }
+        
+        $markdown += @"
+
+## Next Steps
+
+1. Review the planned changes above
+2. If changes look correct, run with `-Execute` flag to apply them
+3. All changes will be wrapped in a transaction for safety
+"@
+        
+        $markdown | Out-File -FilePath $markdownPath -Encoding UTF8
+        Write-Host "  Preview report: $markdownPath" -ForegroundColor Gray
+    }
 }
 
 # Always close connection
@@ -899,3 +1319,6 @@ if ($connection.State -eq 'Open') {
 }
 
 Write-Host ""
+
+# Exit with success code
+exit 0
