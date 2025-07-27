@@ -1,0 +1,68 @@
+# SyncRay Claude Ignore File
+
+# Sync data directory - contains exported JSON files
+sync-data/
+
+# User configuration (contains passwords)
+src/sync-config.json
+
+# Test data and outputs
+test-results/
+test-data/
+*.test.json
+
+# Logs
+*.log
+logs/
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Temporary files
+*.tmp
+*.temp
+~*
+
+# Local configuration overrides
+sync-config.local.json
+sync-config.dev.json
+sync-config.prod.json
+*local-config.json
+
+# IDE and editor files
+.vscode/
+.idea/
+*.suo
+*.user
+.vs/
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Build outputs (if any future compiled versions)
+bin/
+obj/
+out/
+
+# Package files
+*.nupkg
+*.snupkg
+
+# Documentation builds
+docs/_site/
+docs/.jekyll-cache/
+
+# Sensitive data patterns
+*.password
+*.key
+*.pfx
+*.cer
+*credentials*
+*secrets*
