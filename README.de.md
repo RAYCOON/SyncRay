@@ -132,6 +132,25 @@ Der einfachste Weg, SyncRay zu verwenden, ist über das zentrale `syncray.ps1`-S
 - **ignoreColumns**: Spalten, die vom Vergleich ausgeschlossen werden
 - **allowInserts/Updates/Deletes**: Steuerung erlaubter Operationen
 - **exportWhere**: Quelldaten mit SQL WHERE-Klausel filtern
+- **replaceMode**: Alle Datensätze löschen vor dem Einfügen (kompletter Tabellenaustausch)
+
+### Replace-Modus (Neue Funktion)
+
+Wenn `replaceMode: true` für eine Tabelle gesetzt ist:
+1. **Alle vorhandenen Datensätze werden gelöscht** aus der Zieltabelle
+2. **Alle Datensätze aus dem Export werden eingefügt** 
+3. **Keine UPDATE oder einzelnen DELETE** Operationen werden durchgeführt
+4. Nützlich für Referenztabellen oder komplette Datenaktualisierungen
+5. Wird in Transaktion für Sicherheit ausgeführt
+
+Beispielkonfiguration:
+```json
+{
+  "sourceTable": "ReferenzDaten",
+  "replaceMode": true,
+  "preserveIdentity": true
+}
+```
 
 ## Befehlsreferenz
 

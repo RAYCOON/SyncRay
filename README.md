@@ -132,6 +132,25 @@ The easiest way to use SyncRay is through the central `syncray.ps1` script:
 - **ignoreColumns**: Columns to exclude from comparison
 - **allowInserts/Updates/Deletes**: Control allowed operations
 - **exportWhere**: Filter source data with SQL WHERE clause
+- **replaceMode**: Delete all records before inserting (full table replacement)
+
+### Replace Mode (New Feature)
+
+When `replaceMode: true` is set for a table:
+1. **All existing records are deleted** from the target table
+2. **All records from export are inserted** 
+3. **No UPDATE or individual DELETE** operations are performed
+4. Useful for reference tables or complete data refreshes
+5. Executes in transaction for safety
+
+Example configuration:
+```json
+{
+  "sourceTable": "ReferenceData",
+  "replaceMode": true,
+  "preserveIdentity": true
+}
+```
 
 ## Command Reference
 

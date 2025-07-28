@@ -514,28 +514,35 @@ try {
         $allowInserts = if ($null -ne $syncConfig.allowInserts) { $syncConfig.allowInserts } else { $true }
         $allowUpdates = if ($null -ne $syncConfig.allowUpdates) { $syncConfig.allowUpdates } else { $true }
         $allowDeletes = if ($null -ne $syncConfig.allowDeletes) { $syncConfig.allowDeletes } else { $false }
+        $replaceMode = if ($null -ne $syncConfig.replaceMode) { $syncConfig.replaceMode } else { $false }
         
-        # If matchOn is not specified, get primary key from export metadata
-        if (-not $matchOn -or $matchOn.Count -eq 0) {
-            if ($export.metadata.primaryKeys -and $export.metadata.primaryKeys.Count -gt 0) {
-                # Filter out ignored columns
-                $usableKeys = @()
-                if ($ignoreColumns) {
-                    $usableKeys = $export.metadata.primaryKeys | Where-Object { $_ -notin $ignoreColumns }
+        # If replaceMode is enabled, skip matchOn validation
+        if ($replaceMode) {
+            Write-Host "Replace mode enabled - will delete all and insert new records" -ForegroundColor Cyan
+            # Skip matchOn validation in replace mode since we don't need to match records
+        } else {
+            # If matchOn is not specified, get primary key from export metadata
+            if (-not $matchOn -or $matchOn.Count -eq 0) {
+                if ($export.metadata.primaryKeys -and $export.metadata.primaryKeys.Count -gt 0) {
+                    # Filter out ignored columns
+                    $usableKeys = @()
+                    if ($ignoreColumns) {
+                        $usableKeys = $export.metadata.primaryKeys | Where-Object { $_ -notin $ignoreColumns }
+                    } else {
+                        $usableKeys = $export.metadata.primaryKeys
+                    }
+                    
+                    if ($usableKeys.Count -gt 0) {
+                        $matchOn = $usableKeys
+                        Write-Host "Using primary key: $($matchOn -join ', ')" -ForegroundColor Gray
+                    } else {
+                        Write-Host "$sourceTable -> $targetTable... [ERROR] Primary key columns are ignored" -ForegroundColor Red
+                        continue
+                    }
                 } else {
-                    $usableKeys = $export.metadata.primaryKeys
-                }
-                
-                if ($usableKeys.Count -gt 0) {
-                    $matchOn = $usableKeys
-                    Write-Host "Using primary key: $($matchOn -join ', ')" -ForegroundColor Gray
-                } else {
-                    Write-Host "$sourceTable -> $targetTable... [ERROR] Primary key columns are ignored" -ForegroundColor Red
+                    Write-Host "$sourceTable -> $targetTable... [ERROR] No matchOn fields and no primary key in export" -ForegroundColor Red
                     continue
                 }
-            } else {
-                Write-Host "$sourceTable -> $targetTable... [ERROR] No matchOn fields and no primary key in export" -ForegroundColor Red
-                continue
             }
         }
         
@@ -596,103 +603,117 @@ try {
         }
         
         # Analyze changes
-        $changes = @{ inserts = @(); updates = @(); deletes = @() }
+        $changes = @{ inserts = @(); updates = @(); deletes = @(); replaceAll = $false; replaceCount = 0 }
         
-        # Check for inserts and updates
-        foreach ($sourceRow in $export.data) {
-            # Create composite key
-            $keyValues = @()
-            foreach ($keyField in $matchOn) {
-                $keyValues += $sourceRow.$keyField
-            }
-            $compositeKey = $keyValues -join "|"
+        if ($replaceMode) {
+            # In replace mode, we delete all and insert all
+            $changes.replaceAll = $true
+            $changes.replaceCount = $targetRowCount
             
-            if ($targetData.ContainsKey($compositeKey)) {
-                # Check for updates
-                $targetRow = $targetData[$compositeKey]
-                $isDifferent = $false
-                $changedFields = @()
+            # All export data will be inserted
+            foreach ($sourceRow in $export.data) {
+                $changes.inserts += @{
+                    compositeKey = "replace-$($changes.inserts.Count)"  # Dummy key for replace mode
+                    data = $sourceRow
+                }
+            }
+        } else {
+            # Normal mode - check for inserts and updates
+            foreach ($sourceRow in $export.data) {
+                # Create composite key
+                $keyValues = @()
+                foreach ($keyField in $matchOn) {
+                    $keyValues += $sourceRow.$keyField
+                }
+                $compositeKey = $keyValues -join "|"
                 
-                foreach ($col in $columnNames) {
-                    if ($col -notin $matchOn -and $col -notin $ignoreColumns) {
-                        $sourceVal = $sourceRow.$col
-                        $targetVal = $targetRow[$col]
-                        
-                        # Convert types for proper comparison
-                        if ($sourceVal -is [string]) {
-                            if ($sourceVal -match '^\d{4}-\d{2}-\d{2}') {
-                                $sourceVal = [DateTime]::Parse($sourceVal)
+                if ($targetData.ContainsKey($compositeKey)) {
+                    # Check for updates
+                    $targetRow = $targetData[$compositeKey]
+                    $isDifferent = $false
+                    $changedFields = @()
+                    
+                    foreach ($col in $columnNames) {
+                        if ($col -notin $matchOn -and $col -notin $ignoreColumns) {
+                            $sourceVal = $sourceRow.$col
+                            $targetVal = $targetRow[$col]
+                            
+                            # Convert types for proper comparison
+                            if ($sourceVal -is [string]) {
+                                if ($sourceVal -match '^\d{4}-\d{2}-\d{2}') {
+                                    $sourceVal = [DateTime]::Parse($sourceVal)
+                                }
+                                elseif ($sourceVal -eq "True" -or $sourceVal -eq "true") {
+                                    $sourceVal = $true
+                                }
+                                elseif ($sourceVal -eq "False" -or $sourceVal -eq "false") {
+                                    $sourceVal = $false
+                                }
                             }
-                            elseif ($sourceVal -eq "True" -or $sourceVal -eq "true") {
-                                $sourceVal = $true
-                            }
-                            elseif ($sourceVal -eq "False" -or $sourceVal -eq "false") {
-                                $sourceVal = $false
-                            }
-                        }
-                        
-                        # Compare values (handle boolean vs bit comparison)
-                        $areEqual = $false
-                        if ($null -eq $sourceVal -and $null -eq $targetVal) {
-                            $areEqual = $true
-                        }
-                        elseif ($null -eq $sourceVal -or $null -eq $targetVal) {
+                            
+                            # Compare values (handle boolean vs bit comparison)
                             $areEqual = $false
-                        }
-                        elseif ($sourceVal -is [bool] -or $targetVal -is [bool]) {
-                            # Boolean comparison (handle bit/boolean mismatch)
-                            $sourceBool = [bool]$sourceVal
-                            $targetBool = [bool]$targetVal
-                            $areEqual = $sourceBool -eq $targetBool
-                        }
-                        else {
-                            $areEqual = $sourceVal -eq $targetVal
-                        }
-                        
-                        if (-not $areEqual) {
-                            $isDifferent = $true
-                            $changedFields += @{
-                                field = $col
-                                oldValue = $targetVal
-                                newValue = $sourceVal
+                            if ($null -eq $sourceVal -and $null -eq $targetVal) {
+                                $areEqual = $true
+                            }
+                            elseif ($null -eq $sourceVal -or $null -eq $targetVal) {
+                                $areEqual = $false
+                            }
+                            elseif ($sourceVal -is [bool] -or $targetVal -is [bool]) {
+                                # Boolean comparison (handle bit/boolean mismatch)
+                                $sourceBool = [bool]$sourceVal
+                                $targetBool = [bool]$targetVal
+                                $areEqual = $sourceBool -eq $targetBool
+                            }
+                            else {
+                                $areEqual = $sourceVal -eq $targetVal
+                            }
+                            
+                            if (-not $areEqual) {
+                                $isDifferent = $true
+                                $changedFields += @{
+                                    field = $col
+                                    oldValue = $targetVal
+                                    newValue = $sourceVal
+                                }
                             }
                         }
                     }
+                    
+                    if ($isDifferent) {
+                        # Update (only if allowed)
+                        if ($allowUpdates) {
+                            $changes.updates += @{
+                                compositeKey = $compositeKey
+                                matchFields = $matchOn
+                                matchValues = $keyValues
+                                changes = $changedFields
+                                data = $sourceRow
+                            }
+                        }
+                    }
+                    
+                    # Remove from targetData to track deletes
+                    $targetData.Remove($compositeKey)
                 }
-                
-                if ($isDifferent) {
-                    # Update (only if allowed)
-                    if ($allowUpdates) {
-                        $changes.updates += @{
+                else {
+                    # Insert (only if allowed)
+                    if ($allowInserts) {
+                        $changes.inserts += @{
                             compositeKey = $compositeKey
-                            matchFields = $matchOn
-                            matchValues = $keyValues
-                            changes = $changedFields
                             data = $sourceRow
                         }
                     }
                 }
-                
-                # Remove from targetData to track deletes
-                $targetData.Remove($compositeKey)
             }
-            else {
-                # Insert (only if allowed)
-                if ($allowInserts) {
-                    $changes.inserts += @{
-                        compositeKey = $compositeKey
-                        data = $sourceRow
+            
+            # Remaining items in targetData are deletes
+            if ($allowDeletes) {
+                foreach ($key in $targetData.Keys) {
+                    $changes.deletes += @{
+                        compositeKey = $key
+                        data = $targetData[$key]
                     }
-                }
-            }
-        }
-        
-        # Remaining items in targetData are deletes
-        if ($allowDeletes) {
-            foreach ($key in $targetData.Keys) {
-                $changes.deletes += @{
-                    compositeKey = $key
-                    data = $targetData[$key]
                 }
             }
         }
@@ -706,26 +727,35 @@ try {
             insertsDisabled = if (-not $allowInserts) { $true } else { $false }
             updatesDisabled = if (-not $allowUpdates) { $true } else { $false }
             deletesDisabled = if (-not $allowDeletes -and $changes.deletes.Count -gt 0) { $changes.deletes.Count } else { 0 }
+            replaceMode = $replaceMode
+            replaceCount = if ($replaceMode) { $changes.replaceCount } else { 0 }
         }
         $tableResults += $tableResult
         
-        if ($changes.inserts.Count -gt 0) {
+        if ($replaceMode) {
+            # In replace mode, count the delete all + inserts
+            $totalChanges.deletes += $changes.replaceCount
             $totalChanges.inserts += $changes.inserts.Count
-        }
-        if ($changes.updates.Count -gt 0) {
-            $totalChanges.updates += $changes.updates.Count
-        }
-        if ($changes.deletes.Count -gt 0 -and $allowDeletes) {
-            $totalChanges.deletes += $changes.deletes.Count
+        } else {
+            if ($changes.inserts.Count -gt 0) {
+                $totalChanges.inserts += $changes.inserts.Count
+            }
+            if ($changes.updates.Count -gt 0) {
+                $totalChanges.updates += $changes.updates.Count
+            }
+            if ($changes.deletes.Count -gt 0 -and $allowDeletes) {
+                $totalChanges.deletes += $changes.deletes.Count
+            }
         }
         
         # Store changes for later execution
-        if ($changes.inserts.Count -gt 0 -or $changes.updates.Count -gt 0 -or ($allowDeletes -and $changes.deletes.Count -gt 0)) {
+        if ($changes.inserts.Count -gt 0 -or $changes.updates.Count -gt 0 -or ($allowDeletes -and $changes.deletes.Count -gt 0) -or $replaceMode) {
             $allChanges += @{
                 syncConfig = $syncConfig
                 targetTable = $targetTable
                 changes = $changes
                 preserveIdentity = if ($syncConfig.preserveIdentity) { $true } else { $false }
+                replaceMode = $replaceMode
             }
         }
     }
@@ -760,6 +790,13 @@ if ($tableResults.Count -gt 0) {
         if ($result.ContainsKey('skipped') -and $result.skipped) {
             $row += "SKIPPED: $($result.skipReason)".PadLeft($header.Length - $maxTableWidth - 3)
             Write-Host $row -ForegroundColor DarkGray
+            continue
+        }
+        
+        # Check if replace mode
+        if ($result.replaceMode) {
+            $row += "[REPLACE MODE: Delete $($result.replaceCount) + Insert $($result.inserts)]".PadLeft($header.Length - $maxTableWidth - 3)
+            Write-Host $row -ForegroundColor Magenta
             continue
         }
         
@@ -856,6 +893,26 @@ if ($Execute) {
         $hasError = $false
         
         try {
+            # Handle replace mode - delete all records first
+            if ($changeSet.replaceMode) {
+                Write-Host "  [REPLACE MODE] Deleting all $($changes.replaceCount) existing rows..." -ForegroundColor Red -NoNewline
+                
+                $deleteAllCmd = $connection.CreateCommand()
+                $deleteAllCmd.Transaction = $transaction
+                $deleteAllCmd.CommandText = "DELETE FROM [$targetTable]"
+                
+                if ($ShowSQL) {
+                    Write-Host "`n[DEBUG] DELETE ALL SQL:" -ForegroundColor DarkCyan
+                    Write-Host $deleteAllCmd.CommandText -ForegroundColor DarkGray
+                }
+                
+                $deletedRows = $deleteAllCmd.ExecuteNonQuery()
+                $successCount.deletes = $deletedRows
+                $executionStats.deletes += $deletedRows
+                
+                Write-Host " [OK] Deleted $deletedRows rows" -ForegroundColor Green
+            }
+            
             # Check if we need IDENTITY_INSERT
             if ($preserveIdentity) {
                 $identityCmd = $connection.CreateCommand()
@@ -1092,8 +1149,8 @@ if ($Execute) {
                 Write-Host " [OK]" -ForegroundColor Yellow
             }
             
-            # Execute DELETEs
-            if ($syncConfig.allowDeletes -and $changes.deletes.Count -gt 0) {
+            # Execute DELETEs (skip in replace mode as we already deleted all)
+            if ($syncConfig.allowDeletes -and $changes.deletes.Count -gt 0 -and -not $changeSet.replaceMode) {
                 Write-Host "  Deleting $($changes.deletes.Count) rows..." -ForegroundColor Red -NoNewline
                 
                 foreach ($delete in $changes.deletes) {

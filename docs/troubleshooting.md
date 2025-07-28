@@ -133,6 +133,26 @@ The duplicate removal:
 - Check for triggers that might interfere
 - Review foreign key relationships
 
+#### Replace Mode Issues
+**Cause**: Foreign key constraints prevent deletion
+
+**Solution**:
+- Order tables in configuration so dependent tables are processed first
+- Disable foreign key checks temporarily (if allowed)
+- Consider using CASCADE DELETE options
+- Process in correct order: Delete children before parents
+
+Example configuration order for replace mode:
+```json
+{
+  "syncTables": [
+    { "sourceTable": "OrderDetails", "replaceMode": true },
+    { "sourceTable": "Orders", "replaceMode": true },
+    { "sourceTable": "Customers", "replaceMode": true }
+  ]
+}
+```
+
 ### Performance Issues
 
 #### Slow Export

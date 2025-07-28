@@ -30,6 +30,12 @@
       "sourceTable": "Orders",
       "matchOn": ["OrderID"],
       "allowDeletes": true
+    },
+    {
+      "sourceTable": "ReferenceData",
+      "replaceMode": true,
+      "preserveIdentity": true,
+      "_comment": "replaceMode: Deletes all records then inserts all from export (full replace)"
     }
   ],
   

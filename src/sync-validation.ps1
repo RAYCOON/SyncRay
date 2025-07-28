@@ -259,48 +259,53 @@ function Test-SyncConfiguration {
                 # Get primary keys first (needed for detailed duplicate output)
                 $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
                 
-                # Handle empty matchOn - try to use primary key
-                if (-not $syncTable.matchOn -or $syncTable.matchOn.Count -eq 0) {
-                    Write-Host "  No matchOn specified, checking primary key..." -ForegroundColor Gray -NoNewline
-                    
-                    # Filter out ignored columns
-                    $usableKeys = @()
-                    if ($syncTable.ignoreColumns) {
-                        $usableKeys = $primaryKeys | Where-Object { $_ -notin $syncTable.ignoreColumns }
-                    } else {
-                        $usableKeys = $primaryKeys
-                    }
-                    
-                    if ($usableKeys.Count -gt 0) {
-                        Write-Host " [OK] Using: $($usableKeys -join ', ')" -ForegroundColor Green
-                        $syncTable | Add-Member -NotePropertyName "matchOn" -NotePropertyValue $usableKeys -Force
-                    } else {
-                        Write-Host " [X]" -ForegroundColor Red
-                        $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
-                        $errors += "Table '$tableName': No matchOn fields specified and primary key columns are ignored$pkInfo"
-                        continue
-                    }
-                }
-                
-                # Validate matchOn fields exist
-                Write-Host "  Checking match fields..." -ForegroundColor Gray -NoNewline
-                $missingMatchFields = @()
-                foreach ($field in $syncTable.matchOn) {
-                    if (-not $columns.ContainsKey($field)) {
-                        $missingMatchFields += $field
-                    }
-                }
-                
-                if ($missingMatchFields.Count -eq 0) {
+                # Skip matchOn validation for replaceMode
+                if ($syncTable.replaceMode -eq $true) {
+                    Write-Host "  Skipping match field validation (replace mode)..." -ForegroundColor Gray
                     Write-Host " [OK]" -ForegroundColor Green
+                } else {
+                    # Handle empty matchOn - try to use primary key
+                    if (-not $syncTable.matchOn -or $syncTable.matchOn.Count -eq 0) {
+                        Write-Host "  No matchOn specified, checking primary key..." -ForegroundColor Gray -NoNewline
+                        
+                        # Filter out ignored columns
+                        $usableKeys = @()
+                        if ($syncTable.ignoreColumns) {
+                            $usableKeys = $primaryKeys | Where-Object { $_ -notin $syncTable.ignoreColumns }
+                        } else {
+                            $usableKeys = $primaryKeys
+                        }
+                        
+                        if ($usableKeys.Count -gt 0) {
+                            Write-Host " [OK] Using: $($usableKeys -join ', ')" -ForegroundColor Green
+                            $syncTable | Add-Member -NotePropertyName "matchOn" -NotePropertyValue $usableKeys -Force
+                        } else {
+                            Write-Host " [X]" -ForegroundColor Red
+                            $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
+                            $errors += "Table '$tableName': No matchOn fields specified and primary key columns are ignored$pkInfo"
+                            continue
+                        }
+                    }
                     
-                    # Check uniqueness of matchOn fields
-                    Write-Host "  Checking matchOn uniqueness..." -ForegroundColor Gray -NoNewline
-                    $whereClause = if ($Mode -eq "export" -and $syncTable.exportWhere) { $syncTable.exportWhere } else { "" }
-                    $uniquenessTest = Test-MatchFieldsUniqueness -Connection $connection -TableName $tableName -MatchFields $syncTable.matchOn -WhereClause $whereClause -ShowSQL:$ShowSQL -PrimaryKeys $primaryKeys
+                    # Validate matchOn fields exist
+                    Write-Host "  Checking match fields..." -ForegroundColor Gray -NoNewline
+                    $missingMatchFields = @()
+                    foreach ($field in $syncTable.matchOn) {
+                        if (-not $columns.ContainsKey($field)) {
+                            $missingMatchFields += $field
+                        }
+                    }
                     
-                    if ($uniquenessTest.HasDuplicates) {
-                        # During export, duplicates are warnings not errors (will be handled table-by-table)
+                    if ($missingMatchFields.Count -eq 0) {
+                        Write-Host " [OK]" -ForegroundColor Green
+                        
+                        # Check uniqueness of matchOn fields
+                        Write-Host "  Checking matchOn uniqueness..." -ForegroundColor Gray -NoNewline
+                        $whereClause = if ($Mode -eq "export" -and $syncTable.exportWhere) { $syncTable.exportWhere } else { "" }
+                        $uniquenessTest = Test-MatchFieldsUniqueness -Connection $connection -TableName $tableName -MatchFields $syncTable.matchOn -WhereClause $whereClause -ShowSQL:$ShowSQL -PrimaryKeys $primaryKeys
+                        
+                        if ($uniquenessTest.HasDuplicates) {
+                            # During export, duplicates are warnings not errors (will be handled table-by-table)
                         if ($Mode -eq "export") {
                             Write-Host " [!]" -ForegroundColor Yellow
                             $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
@@ -388,15 +393,16 @@ function Test-SyncConfiguration {
                     } elseif ($uniquenessTest.Error) {
                         Write-Host " [!]" -ForegroundColor Yellow
                         $warnings += "Table '$tableName': Could not check uniqueness - $($uniquenessTest.Error)"
+                        } else {
+                            Write-Host " [OK]" -ForegroundColor Green
+                        }
                     } else {
-                        Write-Host " [OK]" -ForegroundColor Green
+                        Write-Host " [X]" -ForegroundColor Red
+                        $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
+                        $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
+                        $errors += "Table '$tableName': Match fields not found: $($missingMatchFields -join ', ')$pkInfo"
                     }
-                } else {
-                    Write-Host " [X]" -ForegroundColor Red
-                    $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
-                    $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
-                    $errors += "Table '$tableName': Match fields not found: $($missingMatchFields -join ', ')$pkInfo"
-                }
+                } # End of else block for replaceMode check
                 
                 # Validate ignoreColumns if specified
                 if ($syncTable.ignoreColumns -and $syncTable.ignoreColumns.Count -gt 0) {
