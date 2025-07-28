@@ -88,6 +88,7 @@ SyncRay uses a JSON configuration file (`sync-config.json`) to define database c
 | `allowDeletes` | boolean | false | Allow DELETE operations |
 | `preserveIdentity` | boolean | false | Use IDENTITY_INSERT |
 | `exportWhere` | string | null | WHERE clause for filtering |
+| `replaceMode` | boolean | false | Delete all records before inserting |
 
 ## Global Settings
 
@@ -171,19 +172,96 @@ SyncRay uses a JSON configuration file (`sync-config.json`) to define database c
 }
 ```
 
+### Replace Mode (Full Table Replacement)
+```json
+{
+  "syncTables": [{
+    "sourceTable": "ReferenceData",
+    "replaceMode": true,
+    "preserveIdentity": true
+  }]
+}
+```
+
+When `replaceMode` is enabled:
+- All existing records in the target table are deleted
+- All records from the export are inserted
+- No UPDATE or individual DELETE operations are performed
+- matchOn fields are not required (and ignored if specified)
+- Duplicate checking is skipped
+- Executes in a transaction for safety
+
+**Important**: Order matters for tables with foreign key relationships:
+```json
+{
+  "syncTables": [
+    { "sourceTable": "OrderDetails", "replaceMode": true },
+    { "sourceTable": "Orders", "replaceMode": true },
+    { "sourceTable": "Customers", "replaceMode": true }
+  ]
+}
+```
+
 ## Validation
 
 Before any operation, SyncRay validates:
 - Database connectivity
 - Table existence
 - Column existence for matchOn fields
-- matchOn field uniqueness
+- matchOn field uniqueness (skipped for replaceMode)
 - WHERE clause syntax
 - User permissions
 
 Run validation only:
 ```powershell
-./src/sync-export.ps1 -From source -Tables TableName
+./src/sync-export.ps1 -From source -Validate
 ```
 
 This runs all checks without exporting data.
+
+## Command Line Parameters
+
+### syncray.ps1 (Main Entry Point)
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `-From` | string | Source database key (triggers export mode) |
+| `-To` | string | Target database key (triggers import mode) |
+| `-Interactive` | switch | Interactive mode with prompts |
+| `-Analyze` | switch | Analyze data quality without exporting |
+| `-Validate` | switch | Validate configuration only |
+| `-Execute` | switch | Apply changes (for import/sync) |
+| `-Tables` | string | Comma-separated list of tables |
+| `-SkipOnDuplicates` | switch | Skip tables with duplicates |
+| `-CreateReports` | switch | Create CSV reports |
+| `-ReportPath` | string | Custom report directory |
+| `-CsvDelimiter` | string | CSV delimiter character |
+| `-ShowSQL` | switch | Show SQL statements |
+| `-Help` | switch | Show help information |
+
+### sync-export.ps1
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `-From` | string | **Required** - Source database key |
+| `-ConfigFile` | string | Configuration file path |
+| `-Tables` | string | Specific tables to export |
+| `-Analyze` | switch | Analyze only, no export |
+| `-Validate` | switch | Validate only |
+| `-SkipOnDuplicates` | switch | Skip duplicate tables |
+| `-CreateReports` | switch | Create quality reports |
+| `-ReportPath` | string | Report output directory |
+| `-CsvDelimiter` | string | CSV delimiter |
+| `-ShowSQL` | switch | Debug SQL output |
+
+### sync-import.ps1
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `-To` | string | **Required** - Target database key |
+| `-ConfigFile` | string | Configuration file path |
+| `-Tables` | string | Specific tables to import |
+| `-Execute` | switch | Apply changes (default: preview) |
+| `-ShowSQL` | switch | Debug SQL output |
+
+**Note**: Import offers interactive duplicate cleanup when duplicates are detected in Execute mode.

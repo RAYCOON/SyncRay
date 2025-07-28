@@ -88,6 +88,7 @@ SyncRay verwendet eine JSON-Konfigurationsdatei (`sync-config.json`) zur Definit
 | `allowDeletes` | boolean | false | DELETE-Operationen erlauben |
 | `preserveIdentity` | boolean | false | IDENTITY_INSERT verwenden |
 | `exportWhere` | string | null | WHERE-Klausel für Filterung |
+| `replaceMode` | boolean | false | Alle Datensätze löschen vor dem Einfügen |
 
 ## Globale Einstellungen
 
@@ -171,19 +172,96 @@ SyncRay verwendet eine JSON-Konfigurationsdatei (`sync-config.json`) zur Definit
 }
 ```
 
+### Replace-Modus (Vollständiger Tabellenaustausch)
+```json
+{
+  "syncTables": [{
+    "sourceTable": "Referenzdaten",
+    "replaceMode": true,
+    "preserveIdentity": true
+  }]
+}
+```
+
+Wenn `replaceMode` aktiviert ist:
+- Alle vorhandenen Datensätze in der Zieltabelle werden gelöscht
+- Alle Datensätze aus dem Export werden eingefügt
+- Keine UPDATE oder einzelnen DELETE Operationen werden durchgeführt
+- matchOn-Felder sind nicht erforderlich (und werden ignoriert)
+- Duplikatsprüfung wird übersprungen
+- Wird in einer Transaktion für Sicherheit ausgeführt
+
+**Wichtig**: Reihenfolge ist wichtig bei Tabellen mit Fremdschlüsselbeziehungen:
+```json
+{
+  "syncTables": [
+    { "sourceTable": "BestellDetails", "replaceMode": true },
+    { "sourceTable": "Bestellungen", "replaceMode": true },
+    { "sourceTable": "Kunden", "replaceMode": true }
+  ]
+}
+```
+
 ## Validierung
 
 Vor jeder Operation validiert SyncRay:
 - Datenbankverbindung
 - Tabellenexistenz
 - Spaltenexistenz für matchOn-Felder
-- Eindeutigkeit der matchOn-Felder
+- Eindeutigkeit der matchOn-Felder (übersprungen bei replaceMode)
 - WHERE-Klausel-Syntax
 - Benutzerberechtigungen
 
 Nur Validierung ausführen:
 ```powershell
-./src/sync-export.ps1 -From source -Tables Tabellenname
+./src/sync-export.ps1 -From source -Validate
 ```
 
 Dies führt alle Prüfungen durch, ohne Daten zu exportieren.
+
+## Befehlszeilenparameter
+
+### syncray.ps1 (Haupteinstiegspunkt)
+
+| Parameter | Typ | Beschreibung |
+|-----------|-----|--------------|
+| `-From` | string | Quelldatenbank-Schlüssel (löst Export-Modus aus) |
+| `-To` | string | Zieldatenbank-Schlüssel (löst Import-Modus aus) |
+| `-Interactive` | switch | Interaktiver Modus mit Eingabeaufforderungen |
+| `-Analyze` | switch | Datenqualität analysieren ohne Export |
+| `-Validate` | switch | Nur Konfiguration validieren |
+| `-Execute` | switch | Änderungen anwenden (für Import/Sync) |
+| `-Tables` | string | Kommagetrennte Liste von Tabellen |
+| `-SkipOnDuplicates` | switch | Tabellen mit Duplikaten überspringen |
+| `-CreateReports` | switch | CSV-Berichte erstellen |
+| `-ReportPath` | string | Benutzerdefiniertes Berichtsverzeichnis |
+| `-CsvDelimiter` | string | CSV-Trennzeichen |
+| `-ShowSQL` | switch | SQL-Anweisungen anzeigen |
+| `-Help` | switch | Hilfeinformationen anzeigen |
+
+### sync-export.ps1
+
+| Parameter | Typ | Beschreibung |
+|-----------|-----|--------------|
+| `-From` | string | **Erforderlich** - Quelldatenbank-Schlüssel |
+| `-ConfigFile` | string | Konfigurationsdateipfad |
+| `-Tables` | string | Spezifische zu exportierende Tabellen |
+| `-Analyze` | switch | Nur analysieren, kein Export |
+| `-Validate` | switch | Nur validieren |
+| `-SkipOnDuplicates` | switch | Doppelte Tabellen überspringen |
+| `-CreateReports` | switch | Qualitätsberichte erstellen |
+| `-ReportPath` | string | Berichtsausgabeverzeichnis |
+| `-CsvDelimiter` | string | CSV-Trennzeichen |
+| `-ShowSQL` | switch | Debug-SQL-Ausgabe |
+
+### sync-import.ps1
+
+| Parameter | Typ | Beschreibung |
+|-----------|-----|--------------|
+| `-To` | string | **Erforderlich** - Zieldatenbank-Schlüssel |
+| `-ConfigFile` | string | Konfigurationsdateipfad |
+| `-Tables` | string | Spezifische zu importierende Tabellen |
+| `-Execute` | switch | Änderungen anwenden (Standard: Vorschau) |
+| `-ShowSQL` | switch | Debug-SQL-Ausgabe |
+
+**Hinweis**: Import bietet interaktive Duplikatbereinigung, wenn Duplikate im Execute-Modus erkannt werden.

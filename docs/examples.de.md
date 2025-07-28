@@ -86,6 +86,68 @@ Referenzdaten an mehrere Datenbanken verteilen:
 ./src/sync-import.ps1 -To filiale3 -Execute
 ```
 
+## Interaktiver Modus
+
+### Verwendung von syncray.ps1 ohne Parameter
+Wenn Sie `syncray.ps1` ohne Parameter ausführen, wird der interaktive Modus gestartet:
+
+```powershell
+./src/syncray.ps1
+```
+
+Interaktive Eingabeaufforderungen führen Sie durch:
+1. **Operationsauswahl**: Export, Import, Sync oder Analyze
+2. **Datenbankauswahl**: Wählen Sie aus konfigurierten Datenbanken
+3. **Tabellenauswahl**: Alle Tabellen oder spezifische Tabellen
+4. **Modusauswahl**: Vorschau oder Ausführen
+5. **Berichtsoptionen**: CSV-Berichte erstellen (optional)
+
+Beispiel-Interaktion:
+```
+=== SYNCRAY INTERAKTIVER MODUS ===
+
+Verfügbare Operationen:
+1. Export - Daten aus Quelldatenbank exportieren
+2. Import - Daten in Zieldatenbank importieren
+3. Sync - Direkte Synchronisierung von Quelle zu Ziel
+4. Analyze - Nur Datenqualität analysieren
+
+Operation wählen (1-4): 3
+
+Verfügbare Quelldatenbanken:
+1. prod
+2. dev
+3. staging
+
+Quelldatenbank wählen (1-3): 1
+
+Verfügbare Zieldatenbanken:
+1. dev
+2. staging
+
+Zieldatenbank wählen (1-2): 1
+
+Tabellen synchronisieren:
+1. Alle konfigurierten Tabellen
+2. Spezifische Tabellen auswählen
+
+Option wählen (1-2): 2
+
+Verfügbare Tabellen:
+1. Benutzer
+2. Bestellungen
+3. Produkte
+4. Kategorien
+
+Tabellen wählen (kommagetrennte Nummern): 1,2
+
+Ausführungsmodus:
+1. Änderungen anzeigen (Dry-Run)
+2. Änderungen ausführen
+
+Modus wählen (1-2): 1
+```
+
 ## Erweiterte Verwendung
 
 ### Zusammengesetzte Schlüssel
@@ -128,6 +190,59 @@ Identity-Werte während der Synchronisierung beibehalten:
     "ignoreColumns": []
   }]
 }
+```
+
+### Replace-Modus Beispiel
+Vollständiger Tabellenaustausch (nützlich für Referenzdaten):
+
+```json
+{
+  "syncTables": [{
+    "sourceTable": "Laender",
+    "replaceMode": true,
+    "preserveIdentity": true
+  }, {
+    "sourceTable": "Bundeslaender",
+    "replaceMode": true,
+    "preserveIdentity": true
+  }, {
+    "sourceTable": "Staedte",
+    "replaceMode": true,
+    "preserveIdentity": true
+  }]
+}
+```
+
+**Hinweis**: Tabellen werden in Konfigurationsreihenfolge verarbeitet. Bei Fremdschlüsselabhängigkeiten, listen Sie Kind-Tabellen vor Eltern-Tabellen auf.
+
+### Umgang mit Duplikaten
+Wenn Duplikate während des Imports mit `-Execute` erkannt werden:
+
+```
+[WARNUNG] Validierung fehlgeschlagen aufgrund doppelter Datensätze in folgenden Tabellen:
+  - Benutzer
+  - Bestellungen
+
+Möchten Sie:
+1) Detaillierte doppelte Datensätze anzeigen
+2) Duplikate automatisch entfernen (behält Datensatz mit niedrigstem Primärschlüssel)
+3) Operation abbrechen
+
+Option wählen (1-3): 1
+
+=== Doppelte Datensätze in Benutzer ===
+BenutzerID | Email           | Name        | DuplikatGruppe
+-----------|-----------------|-------------|---------------
+1234       | john@email.com  | John Doe    | 1
+5678       | john@email.com  | John D.     | 1
+2345       | jane@email.com  | Jane Smith  | 2
+6789       | jane@email.com  | J. Smith    | 2
+
+Möchten Sie jetzt:
+1) Duplikate automatisch entfernen
+2) Operation abbrechen
+
+Option wählen (1-2): 1
 ```
 
 ## Workflow-Beispiele
@@ -175,6 +290,31 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "Validierung fehlgeschlagen, Synchronisierung abgebrochen" -ForegroundColor Red
 }
 ```
+
+### Datenqualitätsanalyse
+Daten analysieren ohne zu exportieren:
+
+```powershell
+# Alle Tabellen analysieren
+./src/sync-export.ps1 -From prod -Analyze
+
+# Mit CSV-Berichten analysieren
+./src/sync-export.ps1 -From prod -Analyze -CreateReports
+
+# Spezifische Tabellen analysieren
+./src/sync-export.ps1 -From prod -Tables "Benutzer,Bestellungen" -Analyze -CreateReports -ReportPath ./berichte
+```
+
+Analysebericht enthält:
+- Doppelte Datensätze nach matchOn-Feldern
+- Tabellen, die übersprungen würden
+- Validierungsprobleme
+- Zeilenanzahl und Datenvolumen
+
+Beispiel generierte CSV-Berichte:
+- `duplicate_issues.csv` - Alle gefundenen doppelten Datensätze
+- `skipped_tables.csv` - Tabellen, die übersprungen würden
+- `data_quality_summary.csv` - Allgemeine Qualitätsmetriken
 
 ## Ausgabebeispiele
 
