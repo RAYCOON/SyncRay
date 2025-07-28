@@ -132,6 +132,27 @@ La forma más fácil de usar SyncRay es a través del script central `syncray.ps
 - **ignoreColumns**: Columnas a excluir de la comparación
 - **allowInserts/Updates/Deletes**: Control de operaciones permitidas
 - **exportWhere**: Filtrar datos de origen con cláusula SQL WHERE
+- **replaceMode**: Eliminar todos los registros antes de insertar (reemplazo completo de tabla)
+- **preserveIdentity**: Mantener valores de columnas de identidad durante la sincronización
+- **targetTable**: Especificar nombre de tabla destino diferente (por defecto: sourceTable)
+
+### Modo de reemplazo (Nueva función)
+
+Cuando `replaceMode: true` está configurado para una tabla:
+1. **Todos los registros existentes se eliminan** de la tabla destino
+2. **Todos los registros de la exportación se insertan**
+3. **No se realizan operaciones UPDATE o DELETE individuales**
+4. Útil para tablas de referencia o actualizaciones completas de datos
+5. Se ejecuta en una transacción para seguridad
+
+Ejemplo de configuración:
+```json
+{
+  "sourceTable": "DatosReferencia",
+  "replaceMode": true,
+  "preserveIdentity": true
+}
+```
 
 ## Referencia de comandos
 

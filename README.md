@@ -133,6 +133,8 @@ The easiest way to use SyncRay is through the central `syncray.ps1` script:
 - **allowInserts/Updates/Deletes**: Control allowed operations
 - **exportWhere**: Filter source data with SQL WHERE clause
 - **replaceMode**: Delete all records before inserting (full table replacement)
+- **preserveIdentity**: Maintain identity column values during sync
+- **targetTable**: Specify different target table name (defaults to sourceTable)
 
 ### Replace Mode (New Feature)
 

@@ -96,15 +96,38 @@ SyncRay uses a JSON configuration file (`sync-config.json`) to define database c
 {
   "exportPath": "./sync-data",
   "defaultDryRun": true,
-  "batchSize": 1000
+  "batchSize": 1000,
+  "_comment": "Comments can be added using _comment fields - they are ignored during processing"
 }
 ```
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `exportPath` | string | "./sync-data" | Directory for export files |
-| `defaultDryRun` | boolean | true | Always dry-run by default |
-| `batchSize` | integer | 1000 | Records per batch (future use) |
+| `defaultDryRun` | boolean | true | Always dry-run by default (not currently implemented) |
+| `batchSize` | integer | 1000 | Records per batch (reserved for future use) |
+| `_comment` | string | n/a | Add inline documentation to your config (ignored by tool) |
+
+## Configuration Comments
+
+### Using _comment Fields
+
+You can add documentation directly in your configuration file using `_comment` fields:
+
+```json
+{
+  "syncTables": [{
+    "sourceTable": "Users",
+    "targetTable": "Users_Archive",
+    "_comment": "Archive old user records daily",
+    "matchOn": ["UserID"],
+    "exportWhere": "LastLogin < DATEADD(year, -1, GETDATE())"
+  }],
+  "_comment": "This configuration handles the daily archival process"
+}
+```
+
+These comments are ignored during processing but help document your configuration.
 
 ## Best Practices
 

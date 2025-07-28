@@ -1,4 +1,6 @@
-# Sync Tools - Einfache Tabellen-Synchronisation
+# Sync Tools - Database Table Synchronization / Einfache Tabellen-Synchronisation
+
+> **Note**: This README is in German. For English documentation, see the main [README.md](../README.md) in the project root.
 
 ## Übersicht
 

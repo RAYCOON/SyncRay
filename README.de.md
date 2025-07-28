@@ -133,6 +133,8 @@ Der einfachste Weg, SyncRay zu verwenden, ist über das zentrale `syncray.ps1`-S
 - **allowInserts/Updates/Deletes**: Steuerung erlaubter Operationen
 - **exportWhere**: Quelldaten mit SQL WHERE-Klausel filtern
 - **replaceMode**: Alle Datensätze löschen vor dem Einfügen (kompletter Tabellenaustausch)
+- **preserveIdentity**: Identity-Spaltenwerte während der Synchronisierung beibehalten
+- **targetTable**: Anderen Namen für Zieltabelle angeben (Standard: sourceTable)
 
 ### Replace-Modus (Neue Funktion)
 

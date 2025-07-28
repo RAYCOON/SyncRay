@@ -96,15 +96,38 @@ SyncRay verwendet eine JSON-Konfigurationsdatei (`sync-config.json`) zur Definit
 {
   "exportPath": "./sync-data",
   "defaultDryRun": true,
-  "batchSize": 1000
+  "batchSize": 1000,
+  "_comment": "Kommentare können mit _comment-Feldern hinzugefügt werden - sie werden bei der Verarbeitung ignoriert"
 }
 ```
 
 | Einstellung | Typ | Standard | Beschreibung |
 |-------------|-----|----------|--------------|
 | `exportPath` | string | "./sync-data" | Verzeichnis für Exportdateien |
-| `defaultDryRun` | boolean | true | Immer Dry-Run als Standard |
-| `batchSize` | integer | 1000 | Datensätze pro Batch (zukünftige Verwendung) |
+| `defaultDryRun` | boolean | true | Immer Dry-Run als Standard (derzeit nicht implementiert) |
+| `batchSize` | integer | 1000 | Datensätze pro Batch (für zukünftige Verwendung reserviert) |
+| `_comment` | string | n/a | Inline-Dokumentation zur Konfiguration hinzufügen (vom Tool ignoriert) |
+
+## Konfigurationskommentare
+
+### Verwendung von _comment-Feldern
+
+Sie können Dokumentation direkt in Ihrer Konfigurationsdatei mit `_comment`-Feldern hinzufügen:
+
+```json
+{
+  "syncTables": [{
+    "sourceTable": "Benutzer",
+    "targetTable": "Benutzer_Archiv",
+    "_comment": "Tägliche Archivierung alter Benutzerdatensätze",
+    "matchOn": ["BenutzerID"],
+    "exportWhere": "LetzterLogin < DATEADD(year, -1, GETDATE())"
+  }],
+  "_comment": "Diese Konfiguration behandelt den täglichen Archivierungsprozess"
+}
+```
+
+Diese Kommentare werden bei der Verarbeitung ignoriert, helfen aber bei der Dokumentation Ihrer Konfiguration.
 
 ## Best Practices
 
