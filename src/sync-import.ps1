@@ -170,8 +170,141 @@ if ($Tables) {
 }
 $validation = Test-SyncConfiguration @validationParams
 if (-not $validation.Success) {
-    Write-Host "`n[ABORTED] Configuration validation failed" -ForegroundColor Red
-    exit 1
+    # Check if validation failed due to duplicates
+    $duplicateProblems = @()
+    foreach ($error in $validation.Errors) {
+        if ($error -match "Duplicate records found in table '([^']+)'") {
+            $tableName = $matches[1]
+            $duplicateProblems += $tableName
+        }
+    }
+    
+    if ($duplicateProblems.Count -gt 0 -and $Execute) {
+        Write-Host "`n[WARNING] Validation failed due to duplicate records in the following tables:" -ForegroundColor Yellow
+        foreach ($table in $duplicateProblems) {
+            Write-Host "  - $table" -ForegroundColor Yellow
+        }
+        
+        Write-Host "`nWould you like to:" -ForegroundColor Cyan
+        Write-Host "1) View detailed duplicate records" -ForegroundColor White
+        Write-Host "2) Automatically remove duplicates (keeps record with lowest primary key)" -ForegroundColor White
+        Write-Host "3) Cancel operation" -ForegroundColor White
+        Write-Host ""
+        
+        do {
+            $choice = Read-Host "Select option (1-3)"
+        } while ($choice -notmatch '^[1-3]$')
+        
+        switch ($choice) {
+            '1' {
+                # Show detailed duplicates
+                $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
+                try {
+                    $connection.Open()
+                    foreach ($tableName in $duplicateProblems) {
+                        $tableConfig = $config.syncTables | Where-Object { 
+                            $targetName = if ([string]::IsNullOrWhiteSpace($_.targetTable)) { $_.sourceTable } else { $_.targetTable }
+                            $targetName -eq $tableName
+                        } | Select-Object -First 1
+                        
+                        if ($tableConfig) {
+                            $matchFields = $tableConfig.matchOn
+                            if (-not $matchFields -or $matchFields.Count -eq 0) {
+                                Write-Host "`nTable: $tableName - Unable to show duplicates (no matchOn fields)" -ForegroundColor Yellow
+                                continue
+                            }
+                            
+                            Write-Host "`n=== Duplicate Records in $tableName ===" -ForegroundColor Cyan
+                            $uniquenessTest = Test-UniquenessConstraint -Connection $connection -TableName $tableName -MatchFields $matchFields -ShowSQL:$ShowSQL
+                            if ($uniquenessTest.DetailedDuplicates) {
+                                Write-Host $uniquenessTest.DetailedDuplicates
+                            }
+                        }
+                    }
+                }
+                finally {
+                    if ($connection.State -eq 'Open') { $connection.Close() }
+                }
+                
+                # After showing duplicates, ask again
+                Write-Host "`nNow would you like to:" -ForegroundColor Cyan
+                Write-Host "1) Automatically remove duplicates" -ForegroundColor White
+                Write-Host "2) Cancel operation" -ForegroundColor White
+                Write-Host ""
+                
+                do {
+                    $choice2 = Read-Host "Select option (1-2)"
+                } while ($choice2 -notmatch '^[1-2]$')
+                
+                if ($choice2 -eq '2') {
+                    Write-Host "`n[ABORTED] Import cancelled by user" -ForegroundColor Yellow
+                    exit 1
+                }
+                $choice = '2' # Continue to duplicate removal
+            }
+            
+            '2' {
+                # Remove duplicates
+                $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
+                try {
+                    $connection.Open()
+                    $allSuccess = $true
+                    
+                    foreach ($tableName in $duplicateProblems) {
+                        $tableConfig = $config.syncTables | Where-Object { 
+                            $targetName = if ([string]::IsNullOrWhiteSpace($_.targetTable)) { $_.sourceTable } else { $_.targetTable }
+                            $targetName -eq $tableName
+                        } | Select-Object -First 1
+                        
+                        if ($tableConfig) {
+                            $matchFields = $tableConfig.matchOn
+                            if (-not $matchFields -or $matchFields.Count -eq 0) {
+                                Write-Host "`nTable: $tableName - Cannot remove duplicates (no matchOn fields)" -ForegroundColor Red
+                                $allSuccess = $false
+                                continue
+                            }
+                            
+                            Write-Host "`nRemoving duplicates from $tableName..." -ForegroundColor Yellow
+                            $result = Remove-DuplicateRecords -Connection $connection -TableName $tableName -MatchFields $matchFields -ShowSQL:$ShowSQL
+                            
+                            if ($result.Success) {
+                                Write-Host "[OK] $($result.Message)" -ForegroundColor Green
+                            } else {
+                                Write-Host "[ERROR] $($result.Message)" -ForegroundColor Red
+                                $allSuccess = $false
+                            }
+                        }
+                    }
+                    
+                    if ($allSuccess) {
+                        Write-Host "`n[OK] All duplicates removed successfully" -ForegroundColor Green
+                        # Re-run validation
+                        Write-Host "Re-running validation..." -ForegroundColor Cyan
+                        $validation = Test-SyncConfiguration @validationParams
+                        if (-not $validation.Success) {
+                            Write-Host "`n[ABORTED] Validation still failing after duplicate removal" -ForegroundColor Red
+                            exit 1
+                        }
+                        Write-Host "[OK] Validation passed" -ForegroundColor Green
+                    } else {
+                        Write-Host "`n[ABORTED] Failed to remove all duplicates" -ForegroundColor Red
+                        exit 1
+                    }
+                }
+                finally {
+                    if ($connection.State -eq 'Open') { $connection.Close() }
+                }
+            }
+            
+            '3' {
+                Write-Host "`n[ABORTED] Import cancelled by user" -ForegroundColor Yellow
+                exit 1
+            }
+        }
+    } else {
+        Write-Host "`n[ABORTED] Configuration validation failed" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # In preview mode, perform compatibility analysis
@@ -198,10 +331,10 @@ if ($actionMode -eq "preview") {
         $jsonFile = Join-Path $exportPath "$($syncConfig.sourceTable).json"
         if (Test-Path $jsonFile) {
             $availableExports += $syncConfig.sourceTable
-            Write-Host "  ✓ $($syncConfig.sourceTable).json found" -ForegroundColor Green
+            Write-Host "  [OK] $($syncConfig.sourceTable).json found" -ForegroundColor Green
         } else {
             $missingExports += $syncConfig.sourceTable
-            Write-Host "  ✗ $($syncConfig.sourceTable).json missing" -ForegroundColor Red
+            Write-Host "  [X] $($syncConfig.sourceTable).json missing" -ForegroundColor Red
         }
     }
     
@@ -280,13 +413,13 @@ if ($actionMode -eq "preview") {
 ### Available Files
 "@
         foreach ($table in $availableExports) {
-            $markdown += "`n- ✓ $table.json"
+            $markdown += "`n- [OK] $table.json"
         }
         
         if ($missingExports.Count -gt 0) {
             $markdown += "`n`n### Missing Files"
             foreach ($table in $missingExports) {
-                $markdown += "`n- ✗ $table.json"
+                $markdown += "`n- [X] $table.json"
             }
         }
         
@@ -328,11 +461,10 @@ if ($actionMode -eq "preview") {
 
 # Determine which sync configs to process
 if ($Tables) {
-    # Filter configs by specified tables
+    # Filter configs by specified tables (using sourceTable for consistency)
     $tableNames = $Tables -split "," | ForEach-Object { $_.Trim() }
     $syncConfigs = $config.syncTables | Where-Object { 
-        $targetName = if ([string]::IsNullOrWhiteSpace($_.targetTable)) { $_.sourceTable } else { $_.targetTable }
-        $targetName -in $tableNames -or $_.sourceTable -in $tableNames
+        $_.sourceTable -in $tableNames
     }
 } else {
     # Use all sync configs
@@ -606,91 +738,93 @@ try {
 # Check if we have any changes
 $hasChanges = $totalChanges.inserts -gt 0 -or $totalChanges.updates -gt 0 -or $totalChanges.deletes -gt 0
 
-# Show what was found in table format
-Write-Host "`n=== CHANGES DETECTED ===" -ForegroundColor Yellow
-Write-Host ""
-
-# Calculate column widths
-$maxTableWidth = ($tableResults | ForEach-Object { $_.table.Length } | Measure-Object -Maximum).Maximum
-$maxTableWidth = [Math]::Max($maxTableWidth, 15)
-
-# Print header
-$header = "Table".PadRight($maxTableWidth) + " | " + "Insert".PadLeft(7) + " | " + "Update".PadLeft(7) + " | " + "Delete".PadLeft(7)
-Write-Host $header -ForegroundColor Cyan
-Write-Host ("-" * $header.Length) -ForegroundColor DarkGray
-
-# Print table data
-foreach ($result in $tableResults) {
-    $row = $result.table.PadRight($maxTableWidth) + " | "
+# Show what was found in table format (only if there are results to show)
+if ($tableResults.Count -gt 0) {
+    Write-Host "`n=== CHANGES DETECTED ===" -ForegroundColor Yellow
+    Write-Host ""
     
-    # Check if table was skipped
-    if ($result.ContainsKey('skipped') -and $result.skipped) {
-        $row += "SKIPPED: $($result.skipReason)".PadLeft($header.Length - $maxTableWidth - 3)
-        Write-Host $row -ForegroundColor DarkGray
-        continue
+    # Calculate column widths
+    $maxTableWidth = ($tableResults | ForEach-Object { $_.table.Length } | Measure-Object -Maximum).Maximum
+    $maxTableWidth = [Math]::Max($maxTableWidth, 15)
+    
+    # Print header
+    $header = "Table".PadRight($maxTableWidth) + " | " + "Insert".PadLeft(7) + " | " + "Update".PadLeft(7) + " | " + "Delete".PadLeft(7)
+    Write-Host $header -ForegroundColor Cyan
+    Write-Host ("-" * $header.Length) -ForegroundColor DarkGray
+    
+    # Print table data
+    foreach ($result in $tableResults) {
+        $row = $result.table.PadRight($maxTableWidth) + " | "
+        
+        # Check if table was skipped
+        if ($result.ContainsKey('skipped') -and $result.skipped) {
+            $row += "SKIPPED: $($result.skipReason)".PadLeft($header.Length - $maxTableWidth - 3)
+            Write-Host $row -ForegroundColor DarkGray
+            continue
+        }
+        
+        # Inserts column
+        if ($result.insertsDisabled) {
+            $row += "OFF".PadLeft(7)
+        } else {
+            $row += $result.inserts.ToString().PadLeft(7)
+        }
+        $row += " | "
+        
+        # Updates column
+        if ($result.updatesDisabled) {
+            $row += "OFF".PadLeft(7)
+        } else {
+            $row += $result.updates.ToString().PadLeft(7)
+        }
+        $row += " | "
+        
+        # Deletes column
+        if ($result.deletesDisabled -gt 0) {
+            $row += "($($result.deletesDisabled))".PadLeft(7)
+        } else {
+            $row += $result.deletes.ToString().PadLeft(7)
+        }
+        
+        Write-Host $row
     }
     
-    # Inserts column
-    if ($result.insertsDisabled) {
-        $row += "OFF".PadLeft(7)
-    } else {
-        $row += $result.inserts.ToString().PadLeft(7)
-    }
-    $row += " | "
+    # Print totals
+    Write-Host ("-" * $header.Length) -ForegroundColor DarkGray
+    $totalRow = "TOTAL".PadRight($maxTableWidth) + " | "
+    $totalRow += $totalChanges.inserts.ToString().PadLeft(7) + " | "
+    $totalRow += $totalChanges.updates.ToString().PadLeft(7) + " | "
+    $totalRow += $totalChanges.deletes.ToString().PadLeft(7)
+    Write-Host $totalRow -ForegroundColor White
+    Write-Host ""
     
-    # Updates column
-    if ($result.updatesDisabled) {
-        $row += "OFF".PadLeft(7)
-    } else {
-        $row += $result.updates.ToString().PadLeft(7)
+    # Show summary line
+    if ($totalChanges.inserts -gt 0) { 
+        Write-Host "  -> $($totalChanges.inserts) new rows to insert" -ForegroundColor Green 
     }
-    $row += " | "
-    
-    # Deletes column
-    if ($result.deletesDisabled -gt 0) {
-        $row += "($($result.deletesDisabled))".PadLeft(7)
-    } else {
-        $row += $result.deletes.ToString().PadLeft(7)
+    if ($totalChanges.updates -gt 0) { 
+        Write-Host "  -> $($totalChanges.updates) rows to update" -ForegroundColor Yellow 
     }
-    
-    Write-Host $row
-}
-
-# Print totals
-Write-Host ("-" * $header.Length) -ForegroundColor DarkGray
-$totalRow = "TOTAL".PadRight($maxTableWidth) + " | "
-$totalRow += $totalChanges.inserts.ToString().PadLeft(7) + " | "
-$totalRow += $totalChanges.updates.ToString().PadLeft(7) + " | "
-$totalRow += $totalChanges.deletes.ToString().PadLeft(7)
-Write-Host $totalRow -ForegroundColor White
-Write-Host ""
-
-# Show summary line
-if ($totalChanges.inserts -gt 0) { 
-    Write-Host "  → $($totalChanges.inserts) new rows to insert" -ForegroundColor Green 
-}
-if ($totalChanges.updates -gt 0) { 
-    Write-Host "  → $($totalChanges.updates) rows to update" -ForegroundColor Yellow 
-}
-if ($totalChanges.deletes -gt 0) { 
-    Write-Host "  → $($totalChanges.deletes) rows to delete" -ForegroundColor Red 
+    if ($totalChanges.deletes -gt 0) { 
+        Write-Host "  -> $($totalChanges.deletes) rows to delete" -ForegroundColor Red 
+    }
 }
 
 # If no changes, show message and exit
 if (-not $hasChanges) {
-    Write-Host "✓ All tables are in sync - no changes needed" -ForegroundColor Green
+    Write-Host "[OK] All tables are in sync - no changes needed" -ForegroundColor Green
     Write-Host ""
     exit 0
 }
 
 # Safety confirmation for execute mode
 if ($Execute) {
-    Write-Host "`n⚠️  WARNING: You are about to modify the database!" -ForegroundColor Yellow
+    Write-Host "`n[!] WARNING: You are about to modify the database!" -ForegroundColor Yellow
     Write-Host ""    
     $confirmation = Read-Host "Do you want to execute these changes? (yes/no)"
     
     if ($confirmation -ne "yes") {
-        Write-Host "`n✗ Aborted - no changes were made" -ForegroundColor Red
+        Write-Host "`n[X] Aborted - no changes were made" -ForegroundColor Red
         Write-Host ""
         exit 0
     }
@@ -714,7 +848,7 @@ if ($Execute) {
         $sourceTable = $syncConfig.sourceTable
         $displayName = if ($sourceTable -eq $targetTable) { $targetTable } else { "$sourceTable -> $targetTable" }
         
-        Write-Host "`n→ $displayName" -ForegroundColor White
+        Write-Host "`n-> $displayName" -ForegroundColor White
         
         # Start transaction for this table
         $transaction = $connection.BeginTransaction()
@@ -855,9 +989,14 @@ if ($Execute) {
                     # Build WHERE clause from match fields
                     $whereClauses = @()
                     for ($i = 0; $i -lt $update.matchFields.Count; $i++) {
-                        $paramName = "@w$i"
-                        $whereClauses += "[$($update.matchFields[$i])] = $paramName"
-                        $whereParameters += @{ name = $paramName; value = $update.matchValues[$i] }
+                        $value = $update.matchValues[$i]
+                        if ($null -eq $value) {
+                            $whereClauses += "[$($update.matchFields[$i])] IS NULL"
+                        } else {
+                            $paramName = "@w$i"
+                            $whereClauses += "[$($update.matchFields[$i])] = $paramName"
+                            $whereParameters += @{ name = $paramName; value = $value }
+                        }
                     }
                     
                     $updateSql = "UPDATE [$targetTable] SET $($setClauses -join ', ') WHERE $($whereClauses -join ' AND ')"
@@ -964,9 +1103,14 @@ if ($Execute) {
                     
                     # Get match field values from the delete data
                     foreach ($matchField in $syncConfig.matchOn) {
-                        $paramName = "@p$($parameters.Count)"
-                        $whereClauses += "[$matchField] = $paramName"
-                        $parameters += @{ name = $paramName; value = $delete.data[$matchField] }
+                        $value = $delete.data.$matchField
+                        if ($null -eq $value) {
+                            $whereClauses += "[$matchField] IS NULL"
+                        } else {
+                            $paramName = "@p$($parameters.Count)"
+                            $whereClauses += "[$matchField] = $paramName"
+                            $parameters += @{ name = $paramName; value = $value }
+                        }
                     }
                     
                     $deleteSql = "DELETE FROM [$targetTable] WHERE $($whereClauses -join ' AND ')"
@@ -980,18 +1124,11 @@ if ($Execute) {
                     $deleteCmd.Transaction = $transaction
                     $deleteCmd.CommandText = $deleteSql
                     
-                    # Add parameters
+                    # Add parameters (only non-NULL values have parameters now)
                     foreach ($param in $parameters) {
-                        if ($null -eq $param.value) {
-                            $deleteCmd.Parameters.AddWithValue($param.name, [DBNull]::Value) | Out-Null
-                            if ($ShowSQL) {
-                                Write-Host "[DEBUG] Parameter $($param.name) = NULL" -ForegroundColor DarkCyan
-                            }
-                        } else {
-                            $deleteCmd.Parameters.AddWithValue($param.name, $param.value) | Out-Null
-                            if ($ShowSQL) {
-                                Write-Host "[DEBUG] Parameter $($param.name) = '$($param.value)'" -ForegroundColor DarkCyan
-                            }
+                        $deleteCmd.Parameters.AddWithValue($param.name, $param.value) | Out-Null
+                        if ($ShowSQL) {
+                            Write-Host "[DEBUG] Parameter $($param.name) = '$($param.value)'" -ForegroundColor DarkCyan
                         }
                     }
                     
@@ -1016,13 +1153,13 @@ if ($Execute) {
                 Write-Host "[DEBUG] Committing transaction..." -ForegroundColor DarkCyan
             }
             $transaction.Commit()
-            Write-Host "  ✓ Transaction committed" -ForegroundColor Green
+            Write-Host "  [OK] Transaction committed" -ForegroundColor Green
         }
         catch {
             # Rollback on error
             $executionSuccess = $false
             Write-Host ""
-            Write-Host "  ✗ ERROR: $_" -ForegroundColor Red
+            Write-Host "  [X] ERROR: $_" -ForegroundColor Red
             
             if ($null -ne $transaction) {
                 Write-Host "  Rolling back transaction..." -ForegroundColor Yellow
@@ -1045,7 +1182,7 @@ if ($Execute) {
     }
     
     if ($executionSuccess) {
-        Write-Host "`n✓ All changes executed successfully" -ForegroundColor Green
+        Write-Host "`n[OK] All changes executed successfully" -ForegroundColor Green
     
         # Show execution statistics in table format
         Write-Host "`n=== EXECUTION STATISTICS ===" -ForegroundColor Cyan
@@ -1165,7 +1302,7 @@ if ($Execute) {
 
 - **Total tables processed**: $($operationDoc.summary.totalTables)
 - **Total operations**: $($operationDoc.summary.totalChanges)
-- **Status**: $(if ($operationDoc.summary.success) { '✓ Success' } else { '✗ Failed' })
+- **Status**: $(if ($operationDoc.summary.success) { '[OK] Success' } else { '[X] Failed' })
 
 ## Operations by Table
 
@@ -1173,8 +1310,8 @@ if ($Execute) {
 |-------|---------|---------|---------|--------|
 "@
             foreach ($result in $operationDoc.tableResults) {
-                $status = if ($result.success) { '✓' } else { '✗' }
-                $tableName = if ($result.sourceTable -eq $result.targetTable) { $result.targetTable } else { "$($result.sourceTable) → $($result.targetTable)" }
+                $status = if ($result.success) { '[OK]' } else { '[X]' }
+                $tableName = if ($result.sourceTable -eq $result.targetTable) { $result.targetTable } else { "$($result.sourceTable) -> $($result.targetTable)" }
                 $markdown += "`n| $tableName | $($result.executed.inserts) | $($result.executed.updates) | $($result.executed.deletes) | $status |"
             }
             
@@ -1191,7 +1328,7 @@ if ($Execute) {
             Write-Host "  Execution report: $markdownPath" -ForegroundColor Gray
         }
     } else {
-        Write-Host "`n✗ Execution failed - some changes may not have been applied" -ForegroundColor Red
+        Write-Host "`n[X] Execution failed - some changes may not have been applied" -ForegroundColor Red
         exit 1
     }
 } else {
@@ -1295,7 +1432,7 @@ if ($Execute) {
 | Table | Inserts | Updates | Deletes |
 |-------|---------|---------|---------|"@
         foreach ($result in $previewDoc.tableResults) {
-            $tableName = if ($result.sourceTable -eq $result.targetTable) { $result.targetTable } else { "$($result.sourceTable) → $($result.targetTable)" }
+            $tableName = if ($result.sourceTable -eq $result.targetTable) { $result.targetTable } else { "$($result.sourceTable) -> $($result.targetTable)" }
             $markdown += "`n| $tableName | $($result.changes.inserts) | $($result.changes.updates) | $($result.changes.deletes) |"
         }
         

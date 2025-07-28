@@ -210,6 +210,12 @@ Importiert Daten aus JSON-Dateien in die Zieldatenbank.
 - `-Execute`: Änderungen anwenden (Standard ist Dry-Run)
 - `-ShowSQL`: SQL-Anweisungen für Debugging anzeigen
 
+**Duplikatbehandlung (Neu):**
+Wenn beim Import-Validierung Duplikate erkannt werden, bietet das Tool interaktive Optionen:
+1. **Detaillierte Duplikate anzeigen** - Zeigt alle doppelten Datensätze mit ihren Daten
+2. **Duplikate automatisch entfernen** - Entfernt Duplikate und behält den Datensatz mit dem niedrigsten Primärschlüssel
+3. **Operation abbrechen** - Import abbrechen
+
 ## Sicherheitsfunktionen
 
 - **Validierung zuerst**: Umfassende Vorabprüfungen vor jeder Operation
@@ -217,6 +223,7 @@ Importiert Daten aus JSON-Dateien in die Zieldatenbank.
 - **Sicherheitsbestätigung**: Explizite Bestätigung für Ausführung erforderlich
 - **Transaktions-Rollback**: Automatisches Rollback bei Fehlern
 - **Duplikatserkennung**: Stellt sicher, dass matchOn-Felder eindeutige Datensätze identifizieren
+- **Sichere Duplikatentfernung**: Interaktive Bestätigung mit Transaktionsschutz
 
 ## Beispielausgabe
 

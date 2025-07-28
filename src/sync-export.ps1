@@ -215,6 +215,60 @@ if ($Tables) {
 # Run validation before proceeding (only for tables we're going to export)
 $validation = Test-SyncConfiguration -Config $config -DatabaseKey $From -Mode "export" -TablesToValidate $tablesToExport -ShowSQL:$ShowSQL
 if (-not $validation.Success) {
+    # Check if validation failed due to duplicates
+    $duplicateProblems = @()
+    foreach ($error in $validation.Errors) {
+        if ($error -match "Duplicate records found in table '([^']+)'") {
+            $tableName = $matches[1]
+            $duplicateProblems += $tableName
+        }
+    }
+    
+    if ($duplicateProblems.Count -gt 0) {
+        Write-Host "`n[WARNING] Validation failed due to duplicate records in the following tables:" -ForegroundColor Yellow
+        foreach ($table in $duplicateProblems) {
+            Write-Host "  - $table" -ForegroundColor Yellow
+        }
+        
+        # Show detailed duplicate information
+        $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
+        try {
+            $connection.Open()
+            foreach ($tableName in $duplicateProblems) {
+                $tableConfig = $config.syncTables | Where-Object { $_.sourceTable -eq $tableName } | Select-Object -First 1
+                
+                if ($tableConfig) {
+                    $matchFields = $tableConfig.matchOn
+                    if (-not $matchFields -or $matchFields.Count -eq 0) {
+                        # Get primary key as matchOn
+                        $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
+                        if ($primaryKeys -and $primaryKeys.Count -gt 0) {
+                            $matchFields = $primaryKeys
+                        } else {
+                            Write-Host "`nTable: $tableName - Unable to show duplicates (no matchOn fields or primary key)" -ForegroundColor Yellow
+                            continue
+                        }
+                    }
+                    
+                    Write-Host "`n=== Duplicate Records in $tableName ===" -ForegroundColor Cyan
+                    $whereClause = if ($tableConfig.exportWhere) { $tableConfig.exportWhere } else { "" }
+                    $uniquenessTest = Test-UniquenessConstraint -Connection $connection -TableName $tableName -MatchFields $matchFields -WhereClause $whereClause -ShowSQL:$ShowSQL
+                    if ($uniquenessTest.DetailedDuplicates) {
+                        Write-Host $uniquenessTest.DetailedDuplicates
+                    }
+                }
+            }
+        }
+        finally {
+            if ($connection.State -eq 'Open') { $connection.Close() }
+        }
+        
+        if (-not $SkipOnDuplicates) {
+            Write-Host "`nTo export tables with duplicates, use -SkipOnDuplicates parameter" -ForegroundColor Yellow
+            Write-Host "This will export duplicate records (keeping all duplicates)" -ForegroundColor Yellow
+        }
+    }
+    
     Write-Host "`n[ABORTED] Configuration validation failed" -ForegroundColor Red
     exit 1
 }
@@ -492,21 +546,52 @@ ORDER BY c.ORDINAL_POSITION
             Write-Host "`n[DEBUG] Excluding ignored columns: $($tableConfig.ignoreColumns -join ', ')" -ForegroundColor DarkCyan
         }
         
-        # Export data with optional WHERE clause
+        # Export data with duplicate handling
         $dataCmd = $connection.CreateCommand()
-        if ($tableConfig.exportWhere) {
-            $dataCmd.CommandText = "SELECT $columnList FROM [$tableName] WHERE $($tableConfig.exportWhere)"
-            Write-Host " (filtered: $($tableConfig.exportWhere))" -ForegroundColor DarkGray -NoNewline
-            if ($ShowSQL) {
-                Write-Host "`n[DEBUG] Executing data export query:" -ForegroundColor DarkCyan
-                Write-Host $dataCmd.CommandText -ForegroundColor DarkGray
+        
+        # If we have duplicates, use ROW_NUMBER to get only one row per matchOn group
+        if ($uniquenessTest -and $uniquenessTest.HasDuplicates) {
+            # Build partition columns for ROW_NUMBER
+            $matchColumns = $tableConfig.matchOn | ForEach-Object { "[$_]" }
+            $partitionBy = $matchColumns -join ", "
+            
+            # Order by primary key to get consistent results
+            $orderBy = if ($primaryKeys.Count -gt 0) {
+                ($primaryKeys | ForEach-Object { "[$_]" }) -join ", "
+            } else {
+                "1"  # Fallback if no primary key
+            }
+            
+            $whereClause = if ($tableConfig.exportWhere) { "WHERE $($tableConfig.exportWhere)" } else { "" }
+            
+            $dataCmd.CommandText = @"
+WITH RankedData AS (
+    SELECT $columnList,
+           ROW_NUMBER() OVER (PARTITION BY $partitionBy ORDER BY $orderBy) as rn
+    FROM [$tableName]
+    $whereClause
+)
+SELECT $($exportColumns -join ", ")
+FROM RankedData
+WHERE rn = 1
+"@
+            Write-Host " (grouped by matchOn)" -ForegroundColor DarkGray -NoNewline
+            if ($tableConfig.exportWhere) {
+                Write-Host " (filtered: $($tableConfig.exportWhere))" -ForegroundColor DarkGray -NoNewline
             }
         } else {
-            $dataCmd.CommandText = "SELECT $columnList FROM [$tableName]"
-            if ($ShowSQL) {
-                Write-Host "`n[DEBUG] Executing data export query:" -ForegroundColor DarkCyan
-                Write-Host $dataCmd.CommandText -ForegroundColor DarkGray
+            # No duplicates, use simple query
+            if ($tableConfig.exportWhere) {
+                $dataCmd.CommandText = "SELECT $columnList FROM [$tableName] WHERE $($tableConfig.exportWhere)"
+                Write-Host " (filtered: $($tableConfig.exportWhere))" -ForegroundColor DarkGray -NoNewline
+            } else {
+                $dataCmd.CommandText = "SELECT $columnList FROM [$tableName]"
             }
+        }
+        
+        if ($ShowSQL) {
+            Write-Host "`n[DEBUG] Executing data export query:" -ForegroundColor DarkCyan
+            Write-Host $dataCmd.CommandText -ForegroundColor DarkGray
         }
         $dataCmd.CommandTimeout = 300  # 5 minutes
         
@@ -580,7 +665,12 @@ ORDER BY c.ORDINAL_POSITION
         $export | ConvertTo-Json -Depth 10 -Compress | Out-File -FilePath $outputFile -Encoding UTF8
         
         $fileSize = (Get-Item $outputFile).Length
-        Write-Host " [OK] $rowCount rows, $('{0:N0}' -f ($fileSize / 1KB)) KB" -ForegroundColor Green
+        if ($uniquenessTest -and $uniquenessTest.HasDuplicates) {
+            $originalRows = $rowCount + $uniquenessTest.TotalDuplicates
+            Write-Host " [OK] $rowCount rows (from $originalRows with duplicates), $('{0:N0}' -f ($fileSize / 1KB)) KB" -ForegroundColor Green
+        } else {
+            Write-Host " [OK] $rowCount rows, $('{0:N0}' -f ($fileSize / 1KB)) KB" -ForegroundColor Green
+        }
         $exportedCount++
         
         # Track exported table info for report
@@ -610,8 +700,8 @@ if ($Preview) {
     
     # Show duplicate statistics like Analyze did
     if ($duplicateProblems.Count -gt 0) {
-        $totalDuplicateRecords = ($duplicateProblems | Measure-Object -Property TotalDuplicates -Sum).Sum
-        $totalDuplicateGroups = ($duplicateProblems | Measure-Object -Property DuplicateGroups -Sum).Sum
+        $totalDuplicateRecords = ($duplicateProblems | ForEach-Object { $_.TotalDuplicates } | Measure-Object -Sum).Sum
+        $totalDuplicateGroups = ($duplicateProblems | ForEach-Object { $_.DuplicateGroups } | Measure-Object -Sum).Sum
         Write-Host "`nDuplicate statistics:" -ForegroundColor Yellow
         Write-Host "  Tables with duplicates: $($duplicateProblems.Count)" -ForegroundColor Gray
         Write-Host "  Total duplicate records: $totalDuplicateRecords" -ForegroundColor Gray
@@ -632,14 +722,14 @@ if ($Preview) {
     
     Write-Host "`nEXPORTED TABLES:" -ForegroundColor White
     foreach ($tableInfo in $exportedTablesInfo) {
-        Write-Host "✓ $($tableInfo.TableName)" -ForegroundColor Green -NoNewline
+        Write-Host "[OK] $($tableInfo.TableName)" -ForegroundColor Green -NoNewline
         Write-Host " - $($tableInfo.RowCount) rows ($('{0:N0}' -f ($tableInfo.FileSize / 1KB)) KB)" -ForegroundColor Gray
     }
     
     if ($skippedTables.Count -gt 0) {
         Write-Host "`nSKIPPED TABLES:" -ForegroundColor Yellow
         foreach ($skipped in $skippedTables) {
-            Write-Host "✗ $($skipped.TableName)" -ForegroundColor Red -NoNewline
+            Write-Host "[X] $($skipped.TableName)" -ForegroundColor Red -NoNewline
             Write-Host " - $($skipped.Reason)" -ForegroundColor Gray
         }
     }
@@ -853,8 +943,8 @@ if ($CreateReports -and (($duplicateProblems.Count -gt 0) -or ($skippedTables.Co
 "@
     
     if ($duplicateProblems.Count -gt 0) {
-        $totalDuplicateRecords = ($duplicateProblems | Measure-Object -Property TotalDuplicates -Sum).Sum
-        $totalDuplicateGroups = ($duplicateProblems | Measure-Object -Property DuplicateGroups -Sum).Sum
+        $totalDuplicateRecords = ($duplicateProblems | ForEach-Object { $_.TotalDuplicates } | Measure-Object -Sum).Sum
+        $totalDuplicateGroups = ($duplicateProblems | ForEach-Object { $_.DuplicateGroups } | Measure-Object -Sum).Sum
         
         $markdown += @"
 

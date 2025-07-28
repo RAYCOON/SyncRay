@@ -66,7 +66,45 @@
 - You'll be prompted to continue or skip when duplicates are found
 - If you continue, duplicates will be grouped by matchOn fields
 - Only one record per unique combination will be exported
-- Use `-NonInteractive` to automatically skip tables with duplicates
+- Use `-SkipOnDuplicates` to automatically skip tables with duplicates
+
+**During Import** (New Feature):
+When duplicates are detected in the target database during validation:
+- The tool will show you which tables have duplicates
+- You'll get three interactive options:
+  1. **View detailed duplicate records** - See all duplicate data
+  2. **Automatically remove duplicates** - Safe removal keeping lowest primary key
+  3. **Cancel operation** - Abort the import
+
+Example interaction:
+```
+[WARNING] Validation failed due to duplicate records in the following tables:
+  - Users
+  - Orders
+
+Would you like to:
+1) View detailed duplicate records
+2) Automatically remove duplicates (keeps record with lowest primary key)
+3) Cancel operation
+
+Select option (1-3): 2
+
+Removing duplicates from Users...
+[OK] Successfully deleted 5 duplicate record(s)
+
+Removing duplicates from Orders...
+[OK] Successfully deleted 3 duplicate record(s)
+
+[OK] All duplicates removed successfully
+Re-running validation...
+[OK] Validation passed
+```
+
+The duplicate removal:
+- Executes in a transaction (automatic rollback on error)
+- Keeps the record with the lowest primary key value
+- Re-validates after cleanup to ensure success
+- Shows detailed progress for each table
 
 ### Execution Errors
 

@@ -195,7 +195,7 @@ function Test-SyncConfiguration {
     # Get database config
     $dbConfig = $Config.databases.$DatabaseKey
     if (-not $dbConfig) {
-        Write-Host "✗ Database '$DatabaseKey' not found in configuration" -ForegroundColor Red
+        Write-Host "[X] Database '$DatabaseKey' not found in configuration" -ForegroundColor Red
         return @{ Success = $false; Errors = @("Database '$DatabaseKey' not found"); Warnings = @() }
     }
     
@@ -210,7 +210,7 @@ function Test-SyncConfiguration {
     Write-Host "Checking database connection..." -ForegroundColor Gray -NoNewline
     $connTest = Test-DatabaseConnection -ConnectionString $connectionString -DatabaseName $dbConfig.database
     if ($connTest.Success) {
-        Write-Host " ✓" -ForegroundColor Green
+        Write-Host " [OK]" -ForegroundColor Green
         
         # Check permissions
         $perms = $connTest.Permissions
@@ -224,9 +224,9 @@ function Test-SyncConfiguration {
             if (-not $perms.CanDelete) { $warnings += "Missing DELETE permission - deletes will fail" }
         }
     } else {
-        Write-Host " ✗" -ForegroundColor Red
+        Write-Host " [X]" -ForegroundColor Red
         $errors += $connTest.Message
-        Write-Host "✗ $($connTest.Message)" -ForegroundColor Red
+        Write-Host "[X] $($connTest.Message)" -ForegroundColor Red
         return @{ Success = $false; Errors = $errors; Warnings = $warnings }
     }
     
@@ -251,7 +251,7 @@ function Test-SyncConfiguration {
             # Check if table exists
             Write-Host "  Checking table existence..." -ForegroundColor Gray -NoNewline
             if (Test-TableExists -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL) {
-                Write-Host " ✓" -ForegroundColor Green
+                Write-Host " [OK]" -ForegroundColor Green
                 
                 # Get table columns
                 $columns = Get-TableColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
@@ -272,10 +272,10 @@ function Test-SyncConfiguration {
                     }
                     
                     if ($usableKeys.Count -gt 0) {
-                        Write-Host " ✓ Using: $($usableKeys -join ', ')" -ForegroundColor Green
+                        Write-Host " [OK] Using: $($usableKeys -join ', ')" -ForegroundColor Green
                         $syncTable | Add-Member -NotePropertyName "matchOn" -NotePropertyValue $usableKeys -Force
                     } else {
-                        Write-Host " ✗" -ForegroundColor Red
+                        Write-Host " [X]" -ForegroundColor Red
                         $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
                         $errors += "Table '$tableName': No matchOn fields specified and primary key columns are ignored$pkInfo"
                         continue
@@ -292,7 +292,7 @@ function Test-SyncConfiguration {
                 }
                 
                 if ($missingMatchFields.Count -eq 0) {
-                    Write-Host " ✓" -ForegroundColor Green
+                    Write-Host " [OK]" -ForegroundColor Green
                     
                     # Check uniqueness of matchOn fields
                     Write-Host "  Checking matchOn uniqueness..." -ForegroundColor Gray -NoNewline
@@ -302,11 +302,11 @@ function Test-SyncConfiguration {
                     if ($uniquenessTest.HasDuplicates) {
                         # During export, duplicates are warnings not errors (will be handled table-by-table)
                         if ($Mode -eq "export") {
-                            Write-Host " ⚠" -ForegroundColor Yellow
+                            Write-Host " [!]" -ForegroundColor Yellow
                             $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
                             $warnings += "Table '$tableName': matchOn fields [$($syncTable.matchOn -join ', ')] produce $($uniquenessTest.TotalDuplicates) duplicate(s)$pkInfo - will prompt during export"
                         } else {
-                            Write-Host " ✗" -ForegroundColor Red
+                            Write-Host " [X]" -ForegroundColor Red
                             $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
                             $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
                             $sqlInfo = if ($ShowSQL -and $uniquenessTest.SqlStatement) { "`nSQL: $($uniquenessTest.SqlStatement)" } else { "" }
@@ -316,7 +316,12 @@ function Test-SyncConfiguration {
                         # Show examples
                         if ($uniquenessTest.Examples) {
                             $exampleColor = if ($Mode -eq "export") { "Yellow" } else { "Red" }
-                            Write-Host "    Example duplicates:" -ForegroundColor $exampleColor
+                            $duplicateLabel = if ($uniquenessTest.Examples.Count -le 3) {
+                                "Duplicate groups found:"
+                            } else {
+                                "Example duplicates (showing first 3):"
+                            }
+                            Write-Host "    $duplicateLabel" -ForegroundColor $exampleColor
                             foreach ($example in $uniquenessTest.Examples | Select-Object -First 3) {
                                 $valueDisplay = ($example.Values.GetEnumerator() | ForEach-Object { "$($_.Key)='$($_.Value)'" }) -join ", "
                                 Write-Host "    - $valueDisplay ($($example.Count) occurrences)" -ForegroundColor $exampleColor
@@ -328,14 +333,66 @@ function Test-SyncConfiguration {
                             Write-Host "`n    Detailed duplicate records (max 200 rows):" -ForegroundColor Yellow
                             Write-Host $uniquenessTest.DetailedDuplicates -ForegroundColor Gray
                         }
+                        
+                        # Offer cleanup option for import mode
+                        if ($Mode -eq "import" -and $uniquenessTest.HasDuplicates) {
+                            Write-Host "`n    [!] Found $($uniquenessTest.TotalDuplicates) duplicate record(s) in $($uniquenessTest.DuplicateGroups) group(s)" -ForegroundColor Yellow
+                            Write-Host "    Would you like to automatically remove duplicates, keeping only one record per group?" -ForegroundColor Yellow
+                            Write-Host "    (The record with the lowest $($primaryKeys[0]) will be kept)" -ForegroundColor Gray
+                            $cleanup = Read-Host "    Clean up duplicates? (yes/no)"
+                            
+                            if ($cleanup -eq "yes") {
+                                Write-Host "`n    Cleaning duplicates..." -ForegroundColor Yellow -NoNewline
+                                
+                                # First show preview
+                                $previewResult = Remove-DuplicateRecords -Connection $connection -TableName $tableName -MatchFields $syncTable.matchOn -PrimaryKeys $primaryKeys -WhereClause $whereClause -ShowSQL:$ShowSQL -Preview
+                                
+                                if ($previewResult.Success -and $previewResult.PreviewCount -gt 0) {
+                                    Write-Host "`n    Confirm deletion of $($previewResult.PreviewCount) duplicate record(s)?" -ForegroundColor Yellow
+                                    $confirm = Read-Host "    Proceed with deletion? (yes/no)"
+                                    
+                                    if ($confirm -eq "yes") {
+                                        $deleteResult = Remove-DuplicateRecords -Connection $connection -TableName $tableName -MatchFields $syncTable.matchOn -PrimaryKeys $primaryKeys -WhereClause $whereClause -ShowSQL:$ShowSQL
+                                        
+                                        if ($deleteResult.Success) {
+                                            Write-Host " [OK]" -ForegroundColor Green
+                                            Write-Host "    $($deleteResult.Message)" -ForegroundColor Green
+                                            
+                                            # Re-run uniqueness test to verify
+                                            Write-Host "    Re-checking uniqueness..." -ForegroundColor Gray -NoNewline
+                                            $uniquenessTest = Test-MatchFieldsUniqueness -Connection $connection -TableName $tableName -MatchFields $syncTable.matchOn -WhereClause $whereClause -ShowSQL:$ShowSQL -PrimaryKeys $primaryKeys
+                                            
+                                            if (-not $uniquenessTest.HasDuplicates) {
+                                                Write-Host " [OK]" -ForegroundColor Green
+                                                # Remove error since duplicates are now cleaned
+                                                $errors = $errors | Where-Object { $_ -notlike "*Table '$tableName': matchOn fields*" }
+                                            } else {
+                                                Write-Host " [X]" -ForegroundColor Red
+                                                Write-Host "    Warning: Some duplicates remain" -ForegroundColor Yellow
+                                            }
+                                        } else {
+                                            Write-Host " [X]" -ForegroundColor Red
+                                            Write-Host "    $($deleteResult.Message)" -ForegroundColor Red
+                                        }
+                                    } else {
+                                        Write-Host "    Skipped duplicate cleanup" -ForegroundColor Gray
+                                    }
+                                } else {
+                                    Write-Host " [OK]" -ForegroundColor Green
+                                    Write-Host "    $($previewResult.Message)" -ForegroundColor Gray
+                                }
+                            } else {
+                                Write-Host "    Skipped duplicate cleanup" -ForegroundColor Gray
+                            }
+                        }
                     } elseif ($uniquenessTest.Error) {
-                        Write-Host " ⚠" -ForegroundColor Yellow
+                        Write-Host " [!]" -ForegroundColor Yellow
                         $warnings += "Table '$tableName': Could not check uniqueness - $($uniquenessTest.Error)"
                     } else {
-                        Write-Host " ✓" -ForegroundColor Green
+                        Write-Host " [OK]" -ForegroundColor Green
                     }
                 } else {
-                    Write-Host " ✗" -ForegroundColor Red
+                    Write-Host " [X]" -ForegroundColor Red
                     $primaryKeys = Get-PrimaryKeyColumns -Connection $connection -TableName $tableName -ShowSQL:$ShowSQL
                     $pkInfo = if ($primaryKeys.Count -gt 0) { " (Primary key: $($primaryKeys -join ', '))" } else { "" }
                     $errors += "Table '$tableName': Match fields not found: $($missingMatchFields -join ', ')$pkInfo"
@@ -352,9 +409,9 @@ function Test-SyncConfiguration {
                     }
                     
                     if ($missingIgnoreFields.Count -eq 0) {
-                        Write-Host " ✓" -ForegroundColor Green
+                        Write-Host " [OK]" -ForegroundColor Green
                     } else {
-                        Write-Host " ✗" -ForegroundColor Red
+                        Write-Host " [X]" -ForegroundColor Red
                         $warnings += "Table '$tableName': Ignore columns not found: $($missingIgnoreFields -join ', ')"
                     }
                 }
@@ -364,9 +421,9 @@ function Test-SyncConfiguration {
                     Write-Host "  Checking WHERE clause..." -ForegroundColor Gray -NoNewline
                     $whereTest = Test-WhereClause -Connection $connection -TableName $tableName -WhereClause $syncTable.exportWhere -ShowSQL:$ShowSQL
                     if ($whereTest.Success) {
-                        Write-Host " ✓" -ForegroundColor Green
+                        Write-Host " [OK]" -ForegroundColor Green
                     } else {
-                        Write-Host " ✗" -ForegroundColor Red
+                        Write-Host " [X]" -ForegroundColor Red
                         $errors += "Table '$tableName': $($whereTest.Message)"
                     }
                 }
@@ -380,7 +437,7 @@ function Test-SyncConfiguration {
                 }
                 
             } else {
-                Write-Host " ✗" -ForegroundColor Red
+                Write-Host " [X]" -ForegroundColor Red
                 $sqlStatement = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '$tableName'"
                 $errorMsg = "Table '$tableName' not found in database"
                 if ($ShowSQL) {
@@ -401,16 +458,16 @@ function Test-SyncConfiguration {
     # Summary
     Write-Host "`n=== VALIDATION SUMMARY ===" -ForegroundColor Cyan
     if ($errors.Count -eq 0) {
-        Write-Host "✓ All validations passed" -ForegroundColor Green
+        Write-Host "[OK] All validations passed" -ForegroundColor Green
     } else {
-        Write-Host "✗ Found $($errors.Count) error(s):" -ForegroundColor Red
+        Write-Host "[X] Found $($errors.Count) error(s):" -ForegroundColor Red
         foreach ($error in $errors) {
             Write-Host "  - $error" -ForegroundColor Red
         }
     }
     
     if ($warnings.Count -gt 0) {
-        Write-Host "⚠ Found $($warnings.Count) warning(s):" -ForegroundColor Yellow
+        Write-Host "[!] Found $($warnings.Count) warning(s):" -ForegroundColor Yellow
         foreach ($warning in $warnings) {
             Write-Host "  - $warning" -ForegroundColor Yellow
         }
@@ -853,6 +910,173 @@ function Export-ValidationProblemsToCSV {
         return @{
             Success = $false
             Message = $_.Exception.Message
+        }
+    }
+}
+
+function Remove-DuplicateRecords {
+    param(
+        [System.Data.SqlClient.SqlConnection]$Connection,
+        [string]$TableName,
+        [string[]]$MatchFields,
+        [string[]]$PrimaryKeys,
+        [string]$WhereClause = "",
+        [switch]$ShowSQL,
+        [switch]$Preview
+    )
+    
+    try {
+        if ($PrimaryKeys.Count -eq 0) {
+            return @{
+                Success = $false
+                Message = "No primary key found for table '$TableName'"
+            }
+        }
+        
+        # Use first primary key for ordering
+        $primaryKey = $PrimaryKeys[0]
+        
+        # Build partition columns
+        $partitionColumns = $MatchFields | ForEach-Object { "[$_]" }
+        $partitionBy = $partitionColumns -join ", "
+        
+        # First, get count of duplicates that would be deleted
+        $whereFilter = if ($WhereClause) { "WHERE $WhereClause" } else { "" }
+        
+        $countQuery = @"
+WITH DuplicatesToDelete AS (
+    SELECT [$primaryKey],
+           ROW_NUMBER() OVER (
+               PARTITION BY $partitionBy
+               ORDER BY [$primaryKey]
+           ) as rn
+    FROM [$TableName]
+    $whereFilter
+)
+SELECT COUNT(*) as DuplicateCount
+FROM DuplicatesToDelete
+WHERE rn > 1
+"@
+        
+        if ($ShowSQL) {
+            Write-Host "`n[DEBUG] Counting duplicates to delete:" -ForegroundColor DarkCyan
+            Write-Host $countQuery -ForegroundColor DarkGray
+        }
+        
+        $cmd = $Connection.CreateCommand()
+        $cmd.CommandText = $countQuery
+        $deleteCount = $cmd.ExecuteScalar()
+        
+        if ($deleteCount -eq 0) {
+            return @{
+                Success = $true
+                Message = "No duplicates to delete"
+                DeletedCount = 0
+            }
+        }
+        
+        if ($Preview) {
+            # Show preview of records to be deleted
+            $previewQuery = @"
+WITH DuplicatesToDelete AS (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY $partitionBy
+               ORDER BY [$primaryKey]
+           ) as rn
+    FROM [$TableName]
+    $whereFilter
+)
+SELECT TOP 20 *
+FROM DuplicatesToDelete
+WHERE rn > 1
+ORDER BY $partitionBy, [$primaryKey]
+"@
+            
+            if ($ShowSQL) {
+                Write-Host "`n[DEBUG] Preview of records to delete:" -ForegroundColor DarkCyan
+                Write-Host $previewQuery -ForegroundColor DarkGray
+            }
+            
+            $cmd.CommandText = $previewQuery
+            $reader = $cmd.ExecuteReader()
+            
+            Write-Host "`n    Records to be deleted (showing max 20):" -ForegroundColor Yellow
+            $previewData = @()
+            while ($reader.Read()) {
+                $row = New-Object PSObject
+                for ($i = 0; $i -lt $reader.FieldCount; $i++) {
+                    $colName = $reader.GetName($i)
+                    if ($colName -ne "rn") {
+                        $value = if ($reader.IsDBNull($i)) { "NULL" } else { $reader.GetValue($i) }
+                        $row | Add-Member -NotePropertyName $colName -NotePropertyValue $value
+                    }
+                }
+                $previewData += $row
+            }
+            $reader.Close()
+            
+            if ($previewData.Count -gt 0) {
+                $previewData | Format-Table -AutoSize | Out-String | Write-Host -ForegroundColor Gray
+            }
+            
+            return @{
+                Success = $true
+                Message = "Would delete $deleteCount duplicate record(s)"
+                DeletedCount = 0
+                PreviewCount = $deleteCount
+            }
+        }
+        
+        # Execute deletion
+        $deleteQuery = @"
+WITH DuplicatesToDelete AS (
+    SELECT [$primaryKey],
+           ROW_NUMBER() OVER (
+               PARTITION BY $partitionBy
+               ORDER BY [$primaryKey]
+           ) as rn
+    FROM [$TableName]
+    $whereFilter
+)
+DELETE FROM [$TableName]
+WHERE [$primaryKey] IN (
+    SELECT [$primaryKey]
+    FROM DuplicatesToDelete
+    WHERE rn > 1
+)
+"@
+        
+        if ($ShowSQL) {
+            Write-Host "`n[DEBUG] Executing delete query:" -ForegroundColor DarkCyan
+            Write-Host $deleteQuery -ForegroundColor DarkGray
+        }
+        
+        $transaction = $Connection.BeginTransaction()
+        try {
+            $cmd = $Connection.CreateCommand()
+            $cmd.Transaction = $transaction
+            $cmd.CommandText = $deleteQuery
+            $deletedRows = $cmd.ExecuteNonQuery()
+            
+            $transaction.Commit()
+            
+            return @{
+                Success = $true
+                Message = "Successfully deleted $deletedRows duplicate record(s)"
+                DeletedCount = $deletedRows
+            }
+        }
+        catch {
+            $transaction.Rollback()
+            throw
+        }
+    }
+    catch {
+        return @{
+            Success = $false
+            Message = "Failed to remove duplicates: $($_.Exception.Message)"
+            DeletedCount = 0
         }
     }
 }

@@ -210,6 +210,12 @@ Import data from JSON files to target database.
 - `-Execute`: Apply changes (default is dry-run)
 - `-ShowSQL`: Show SQL statements for debugging
 
+**Duplicate Handling (New):**
+When duplicates are detected during import validation, the tool offers interactive options:
+1. **View detailed duplicate records** - Shows all duplicate records with their data
+2. **Automatically remove duplicates** - Removes duplicates keeping the record with the lowest primary key
+3. **Cancel operation** - Abort the import
+
 ## Safety Features
 
 - **Validation First**: Comprehensive pre-flight checks before any operation
@@ -217,6 +223,7 @@ Import data from JSON files to target database.
 - **Safety Confirmation**: Explicit confirmation required for execution
 - **Transaction Rollback**: Automatic rollback on any error
 - **Duplicate Detection**: Ensures matchOn fields identify unique records
+- **Safe Duplicate Removal**: Interactive confirmation with transaction protection
 
 ## Example Output
 

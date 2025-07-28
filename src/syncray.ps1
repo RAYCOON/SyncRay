@@ -505,12 +505,12 @@ COMMON PARAMETERS:
 
 PARAMETER COMPATIBILITY:
     Preview Mode (default):
-        ✓ All parameters except -Execute
+        [OK] All parameters except -Execute
         Shows what would happen without changes
 
     Execute Mode (-Execute):
-        ✓ Works with all operation modes
-        ✓ -CreateReport generates operation documentation
+        [OK] Works with all operation modes
+        [OK] -CreateReport generates operation documentation
 
 EXAMPLES:
     # Preview what would be exported

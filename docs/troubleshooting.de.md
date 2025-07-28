@@ -66,7 +66,45 @@
 - Sie werden gefragt, ob Sie fortfahren oder überspringen möchten, wenn Duplikate gefunden werden
 - Bei Fortsetzung werden Duplikate nach matchOn-Feldern gruppiert
 - Nur ein Datensatz pro eindeutiger Kombination wird exportiert
-- Verwenden Sie `-NonInteractive` um Tabellen mit Duplikaten automatisch zu überspringen
+- Verwenden Sie `-SkipOnDuplicates` um Tabellen mit Duplikaten automatisch zu überspringen
+
+**Beim Import** (Neue Funktion):
+Wenn Duplikate in der Zieldatenbank während der Validierung erkannt werden:
+- Das Tool zeigt Ihnen, welche Tabellen Duplikate haben
+- Sie erhalten drei interaktive Optionen:
+  1. **Detaillierte Duplikate anzeigen** - Alle doppelten Daten anzeigen
+  2. **Duplikate automatisch entfernen** - Sichere Entfernung, behält niedrigsten Primärschlüssel
+  3. **Operation abbrechen** - Import abbrechen
+
+Beispiel-Interaktion:
+```
+[WARNUNG] Validierung fehlgeschlagen aufgrund doppelter Datensätze in folgenden Tabellen:
+  - Users
+  - Orders
+
+Möchten Sie:
+1) Detaillierte Duplikate anzeigen
+2) Duplikate automatisch entfernen (behält Datensatz mit niedrigstem Primärschlüssel)
+3) Operation abbrechen
+
+Option wählen (1-3): 2
+
+Entferne Duplikate aus Users...
+[OK] Erfolgreich 5 doppelte Datensätze gelöscht
+
+Entferne Duplikate aus Orders...
+[OK] Erfolgreich 3 doppelte Datensätze gelöscht
+
+[OK] Alle Duplikate erfolgreich entfernt
+Validierung wird erneut ausgeführt...
+[OK] Validierung erfolgreich
+```
+
+Die Duplikatentfernung:
+- Wird in einer Transaktion ausgeführt (automatisches Rollback bei Fehler)
+- Behält den Datensatz mit dem niedrigsten Primärschlüsselwert
+- Validiert nach Bereinigung erneut für Erfolgssicherung
+- Zeigt detaillierten Fortschritt für jede Tabelle
 
 ### Ausführungsfehler
 
