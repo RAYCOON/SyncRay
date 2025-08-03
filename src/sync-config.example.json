@@ -13,6 +13,32 @@
       "password": "password"
     }
   },
+
+  "_examples": {
+    "_comment": "Example configurations for different database types",
+    "sqlserver": {
+      "server": "localhost\\SQLEXPRESS",
+      "database": "MyDatabase",
+      "auth": "windows"
+    },
+    "postgresql": {
+      "server": "localhost",
+      "database": "mydatabase",
+      "port": 5432,
+      "auth": "postgresql",
+      "user": "postgres",
+      "password": "password"
+    },
+    "postgresql_uri": {
+      "server": "postgresql://user:password@localhost:5432/mydatabase",
+      "auth": "postgresql"
+    },
+    "sqlite": {
+      "server": "./data/mydata.db",
+      "database": "",
+      "auth": "sqlite"
+    }
+  },
   
   "syncTables": [ 
     {
@@ -43,5 +69,19 @@
   "defaultDryRun": true,
   "batchSize": 1000,
   
-  "_comment": "Use -ShowSQL flag with sync-export.ps1 or sync-import.ps1 to enable detailed SQL logging and debug output"
+  "_comment": "Use -ShowSQL flag with sync-export.ps1 or sync-import.ps1 to enable detailed SQL logging and debug output",
+  
+  "_database_support": {
+    "_comment": "SyncRay supports multiple database types",
+    "supported": ["SQL Server", "PostgreSQL", "SQLite"],
+    "requirements": {
+      "postgresql": "Requires Npgsql.dll or Npgsql NuGet package",
+      "sqlite": "Requires PSSQLite PowerShell module"
+    },
+    "detection": {
+      "postgresql": "Host=, Port=, postgresql://, postgres:// in connection string",
+      "sqlite": "File extensions: .db, .sqlite or Data Source=file.db",
+      "sqlserver": "Default for other connection strings"
+    }
+  }
 }
